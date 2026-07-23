@@ -1417,7 +1417,7 @@ const RAW_ROWS = BASE_ROWS.concat(EXTRA_ROWS).map(applyItemCodeExactRule).map(wi
 // Validation progress persists in localStorage until export succeeds — refreshing or
 // closing the tab must not lose a user's in-progress review of a batch.
 const STORAGE_KEY = "imv_validation_state";
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 3;
 
 function loadPersistedRows() {
   try {
@@ -1528,18 +1528,10 @@ function buildExportRows(displayRows) {
   // later moment, not when the batch was first pulled in.
   const exportedAt = formatBangkokTimestamp(new Date());
 
-  // Passthrough columns (unknown-to-this-app headers from the import file, e.g. an ad hoc
-  // "Note" column) vary per file — export the union of every header seen across all rows,
-  // using each column's own original header text, blank where a row didn't have it.
-  const passthroughHeaders = [];
-  const seenHeaders = new Set();
-  displayRows.forEach(r => Object.keys(r.passthroughFields || {}).forEach(header => {
-    if (!seenHeaders.has(header)) { seenHeaders.add(header); passthroughHeaders.push(header); }
-  }));
-
   return displayRows.map(r => {
     const out = {
       "Invoice No.": r.invoiceNo,
+      "PO No.": r.poNo,
       "Supplier Name (OCR)": r.supplierNameOcr,
       "Selected Supplier": r.selectedSupplier,
       "Supplier Item Code (OCR)": r.ocrItemCode,
@@ -1549,6 +1541,10 @@ function buildExportRows(displayRows) {
       "Confidence (%)": r.confidence,
       "RVN Item Code": r.selectedItem ? r.selectedItem.rvnItemCode : "",
       "RVN Item Name": r.selectedItem ? r.selectedItem.rvnItemName : "",
+      "PO Qty": r.poQty,
+      "PO Unit Price": r.poUnitPrice,
+      "PO ex.VAT": r.poExVat,
+      "PO UOM": r.poUOM,
       "Invoice Qty": r.invQty,
       "Invoice Unit Price": r.invUnitPrice,
       "Invoice ex.VAT": r.invExVat,
@@ -1558,10 +1554,6 @@ function buildExportRows(displayRows) {
       out[label] = r[field] !== undefined ? r[field] : "";
     });
     out["Document ID"] = r.documentId || "";
-    passthroughHeaders.forEach(header => {
-      const value = (r.passthroughFields || {})[header];
-      out[header] = value !== undefined ? value : "";
-    });
     out["Confirmed By"] = r.isUserConfirmed ? "User" : (r.isAutoFilled ? "Auto" : "");
     out["Exported At"] = exportedAt;
     return out;
@@ -1664,17 +1656,7 @@ function findMissingImportColumns(sheetRows) {
   return IMPORT_COLUMNS.filter(([header]) => !headers.includes(header)).map(([header]) => header);
 }
 
-// Every header this app recognizes by name — anything else in the sheet is "unknown" to it.
-function knownImportHeaders() {
-  return IMPORT_COLUMNS.map(([header]) => header)
-    .concat(OPTIONAL_IMPORT_COLUMNS.map(([header]) => header))
-    .concat([DOCUMENT_ID_HEADER]);
-}
-
 function parseImportedRows(sheetRows) {
-  const known = knownImportHeaders();
-  const passthroughHeaders = sheetRows.length ? Object.keys(sheetRows[0]).filter(h => !known.includes(h)) : [];
-
   return sheetRows.map((raw, idx) => {
     const row = { id: idx + 1 };
     IMPORT_COLUMNS.forEach(([header, field]) => {
@@ -1698,13 +1680,6 @@ function parseImportedRows(sheetRows) {
 
     row.documentId = raw[DOCUMENT_ID_HEADER] !== undefined ? String(raw[DOCUMENT_ID_HEADER]) : "";
 
-    // Columns this app doesn't recognize (e.g. an ad hoc "Note" column IT adds) are never
-    // shown on screen — but the raw values are still carried through untouched so the export
-    // can round-trip them back out. IT may rely on data in these columns downstream even
-    // though this screen has no use for it.
-    row.passthroughFields = {};
-    passthroughHeaders.forEach(header => { row.passthroughFields[header] = raw[header]; });
-
     return applyItemCodeExactRule(row);
   });
 }
@@ -1723,7 +1698,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showOnlyReview, setShowOnlyReview] = useState(false);
   const [expandedRows, setExpandedRows] = useState({});
-  const [rows, setRows] = useState(() => loadPersistedRows() || RAW_ROWS.map(r => ({ ...r })));
+  const [rows, setRows] = useState(() => loadPersistedRows() || []);
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState("");
   const [hoveredField, setHoveredField] = useState(null);
@@ -1932,8 +1907,6 @@ function App() {
     // PO fields (poQty/poUnitPrice/poExVat/poUOM/poNo) are still imported and exported (§5 spec)
     // but no longer rendered anywhere in the UI — the user asked for PO data to disappear from
     // the web app entirely, keeping only the Invoice side visible/editable here.
-    // Always shown (considered, then explicitly rejected, hiding these when blank — unlike the
-    // 6 optional fields below) — a blank value shows the "ไม่ทราบค่า" placeholder instead.
     const compareFields = [
       { label: "Qty", invField: invQtyF },
       { label: "Unit Price", invField: invPriceF },
@@ -2187,7 +2160,7 @@ function App() {
                                     <input className="input" style={{ padding: "2px 6px", minHeight: "auto", fontSize: 13, width: 100, background: "var(--color-bg)" }} value={editValue} onChange={e => setEditValue(e.target.value)} onKeyDown={e => { if (e.key === "Enter") commitEditField(); if (e.key === "Escape") cancelEditField(); }} onBlur={commitEditField} autoFocus />
                                   ) : (
                                     <span style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4, ...styleObj(cf.invField.underline) }} onClick={cf.invField.onStart} onMouseEnter={cf.invField.onHoverIn} onMouseLeave={cf.invField.onHoverOut}>
-                                      <span style={!cf.invField.value ? { fontStyle: "italic", color: "color-mix(in srgb, var(--color-text) 45%, transparent)" } : undefined}>{cf.invField.value || "ไม่ทราบค่า"}</span>
+                                      <span>{cf.invField.value}</span>
                                       {cf.invField.isEdited && (
                                         <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--color-accent-700)", flex: "none" }}></span>
                                       )}
