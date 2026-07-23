@@ -4,6 +4,13 @@
 > gets copied to another computer, this file travels with it and should give a fresh Claude
 > session everything it needs without the user re-explaining from scratch.
 
+**On-screen page title/heading is now "Invoice data Validation"**, not "Item Mapping Validation"
+— the `<title>` tag and the visible `<h1>` in `index.html` were changed at the user's request.
+"Item Mapping Validation" is kept everywhere else in this file (and in the Claude Design project
+name, §6) as this screen's internal/project name — only the text a user actually sees on the
+page changed, not the screen's identity in documentation. Don't "fix" this apparent inconsistency
+by renaming one to match the other without asking; it's intentional.
+
 ## 1. Who/what this is for
 
 **RVN 1020** is a subsidiary of Tipco Asphalt Group — a trading company that sources and sells
