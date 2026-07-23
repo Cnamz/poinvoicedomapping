@@ -602,7 +602,7 @@ const FALLBACK_SUPPLIER_MASTER = {
 // open; in that case the app silently falls back to FALLBACK_SUPPLIER_MASTER below (a manual
 // "Import Supplier Master" button was considered as a file:// fallback but explicitly rejected —
 // don't re-add it).
-const SUPPLIER_MASTER_FILENAME = "supplier_master.xlsx";
+const SUPPLIER_MASTER_FILENAME = "supplier_item_master.xlsx";
 
 // Parses a raw Supplier Master worksheet (SheetJS sheet_to_json rows) into the same
 // { [supplierName]: [{supplierItemCode, supplierItemName, supplierUom}, ...] } shape as
@@ -611,15 +611,30 @@ const SUPPLIER_MASTER_FILENAME = "supplier_master.xlsx";
 // to hand to IT — flat columns, header row 1, no Oracle DFF pipe-delimited fields, no RVN/FG
 // Item codes (deliberately excluded, §3). Each field also falls back to the OLD source file's
 // header text ("Oracle Supplier Name" / "supplier item code" / "supplier item name" / "supplier
-// item UOM (INV)") so the currently-deployed `supplier_master.xlsx` (copied from "Supplier item
-// master update 1.xlsx") keeps working until IT delivers a file in the new format — once that
+// item UOM (INV)") so an old-format file (originally copied from "Supplier item master update
+// 1.xlsx") would keep working — moot now that the real IT file is deployed (§4), but harmless to
+// keep as a safety net. Filename is `SUPPLIER_MASTER_FILENAME` above — currently
+// `"supplier_item_master.xlsx"`, matching what IT actually calls their export; once that
 // happens the old fallback names can be deleted, but don't remove them pre-emptively. Note: the
 // supplier's full Thai company name must match the Invoice file's own "Supplier Name" column
 // exactly — a past bug used the OLD file's plain "supplier name" column, which is actually just
 // a short internal mnemonic code ("JWT"/"KTMT"), not the real name; don't reintroduce that key.
+// Header lookups are whitespace-tolerant: IT's real first delivery of this file has a literal
+// trailing space in its "Supplier Item Code " header (confirmed by inspecting the actual file —
+// it's generated from an Oracle SQL query with `... as "Supplier Item Code "`, space included in
+// the query itself). An exact-string lookup would silently return "" for every row's item code
+// forever. `trimmedKeys()` normalizes every column name on a row before any field lookup runs,
+// so this — and any similar accidental whitespace in a future delivery — doesn't silently break.
+function trimmedKeys(raw) {
+  const out = {};
+  Object.keys(raw).forEach(k => { out[k.trim()] = raw[k]; });
+  return out;
+}
+
 function parseSupplierMasterRows(sheetRows) {
   const master = {};
-  sheetRows.forEach(raw => {
+  sheetRows.forEach(rawUntrimmed => {
+    const raw = trimmedKeys(rawUntrimmed);
     const supplierName = String(raw["Supplier Name"] ?? raw["Oracle Supplier Name"] ?? "").trim();
     if (!supplierName) return;
     const item = {

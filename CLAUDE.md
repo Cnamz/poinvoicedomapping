@@ -292,8 +292,10 @@ considered.
   `supplierMaster` React state (everything that used to read the `SUPPLIER_MASTER` constant —
   `findMasterItem()`, the Supplier/Item picker dialogs — now reads this state instead;
   `findMasterItem()`'s signature gained a `master` first parameter for this) via **auto-fetch on
-  every page load only**: `fetch(SUPPLIER_MASTER_FILENAME)` (constant = `"supplier_master.xlsx"`)
-  looks for that exact filename next to `index.html`. If found and parseable, it silently
+  every page load only**: `fetch(SUPPLIER_MASTER_FILENAME)` (constant =
+  `"supplier_item_master.xlsx"` — renamed from `"supplier_master.xlsx"` at the user's request once
+  the real file arrived, to match IT's own filename) looks for that exact filename next to
+  `index.html`. If found and parseable, it silently
   replaces the built-in fallback. **Only works over http(s)** (Codespace, GitHub Pages,
   Cloudflare Pages) — `fetch()` of a local file is blocked under a plain `file://` open, so this
   silently no-ops there (falls back to `FALLBACK_SUPPLIER_MASTER`, no error shown — this is
@@ -326,19 +328,40 @@ considered.
   `supplierUom: ""`), so no code change was needed for that specific ask, only for the header
   names below.
   `parseSupplierMasterRows()` now reads each field with **new-name-first, old-name-fallback**
-  (`raw["Supplier Name"] ?? raw["Oracle Supplier Name"]`, and similarly for Item
-  Code/Name/UOM) — the currently-deployed `supplier_master.xlsx` (still in the OLD "Supplier item
-  master update 1.xlsx" shape) keeps working via the fallback names until IT delivers a real file
-  in the new 4-column shape; verified both the old-format file (546-row invoice test: 514
-  auto-resolved, unchanged) and a hand-built new-format file (with an intentionally blank UOM)
-  parse correctly. **Once a real new-format file from IT is confirmed working in production, the
-  old fallback header names can be deleted from `parseSupplierMasterRows()`** — not urgent, but
-  don't be surprised to find both present; that's intentional dual-support, not leftover cruft.
+  (`raw["Supplier Name"] ?? raw["Oracle Supplier Name"]`, and similarly for Item Code/Name/UOM) —
+  built at the time so an old-format file (copied from "Supplier item master update 1.xlsx")
+  would keep working via the fallback names until IT delivered a real file; verified both the
+  old-format file (546-row invoice test: 514 auto-resolved) and a hand-built new-format file
+  (with an intentionally blank UOM) parse correctly. **The real file has since arrived and is
+  deployed (see below)** — the old fallback header names could now be deleted from
+  `parseSupplierMasterRows()`, but were deliberately left in place regardless, not urgent to
+  remove; don't be surprised to find both present, that's intentional dual-support, not leftover
+  cruft.
   **Deployment note**: whoever deploys this app for real needs to place an actual
-  `supplier_master.xlsx` next to `index.html` for auto-fetch to find anything (a dev copy exists
-  in this project folder already, copied from "Supplier item master update 1.xlsx" — old-format
-  shape, works via the fallback header names above) — this is a manual step outside the app
-  itself, not automated by any build process (there is no build process, §1).
+  `supplier_item_master.xlsx` (exact filename, matching `SUPPLIER_MASTER_FILENAME`) next to
+  `index.html` for auto-fetch to find anything — this is a manual step outside the app itself,
+  not automated by any build process (there is no build process, §1). A real copy already exists
+  in this project folder (see below).
+  **The real file from IT has arrived and is now the one deployed** (`supplier_item_master.xlsx`,
+  "Export Worksheet" sheet, 100 rows / 27 suppliers, generated from an Oracle SQL query against
+  `fnd_lookup_values` — the `SQL` sheet in the file itself documents the exact query). Only 3 of
+  the 4 requested columns are present — **`Supplier Item UOM` is missing entirely** (not even as
+  a blank column; Oracle genuinely doesn't track it yet, matching what the user warned) — the
+  parser already handles a fully-absent UOM column gracefully, no fix needed there.
+  **Real gotcha caught and fixed**: the actual header is `"Supplier Item Code "` — **with a
+  trailing space** — traced to the source SQL itself (`... as "Supplier Item Code "`, space
+  included in the query). An exact-string header lookup would have silently returned `""` for
+  every single row's item code, forever, with no error — caught by inspecting the real file
+  before wiring it up (established practice in this project after the "JWT" mnemonic-code
+  incident). Fixed generally, not with a one-off key: `parseSupplierMasterRows()` now runs
+  `trimmedKeys()` on every row first, stripping whitespace from every column name before any
+  field lookup — covers this file and any future whitespace surprises the same way. Verified
+  against the real 546-row invoice file: 515 auto-resolved (**one better** than the old hardcoded
+  `FALLBACK_SUPPLIER_MASTER`'s 514 — this real data is slightly more complete). The dev copy of
+  `supplier_item_master.xlsx` in this project folder is now this real file, not the old "Supplier
+  item master update 1.xlsx" — but the old-header fallback names in the parser were deliberately
+  left in place regardless (§ above), since this file still only has 3 of 4 columns and a future
+  delivery's exact header text isn't guaranteed identical.
 - The broader RVN Item Master reference (1,361 items, English descriptions, Product
   Type/Category hierarchy) lives in **"Copy of RVN Inventory Org Structure Updated_Y2026
   (3).xlsb"**, sheet **"Final"** — was never wired into the app, and per the RVN-removal decision
