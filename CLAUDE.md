@@ -416,21 +416,28 @@ batch model above already tends to enforce this naturally). If the team later ne
 concurrent multi-user editing on the same batch, that's a scope change requiring a real backend
 — flag it back to the user/IT rather than trying to solve it client-side.
 
-**Local-file-bridge import — BUILT, then upgraded to a unified Import+Export file handle**
-after a follow-up meeting revealed the real SharePoint workflow: IT keeps one "Output" folder
-holding a single round-tripped file — person A downloads it, edits, re-uploads with the **same
-filename** (SharePoint auto-versions it, keeping the old one as history), person B then pulls
-that same-named file, edits, re-uploads again, and so on. To match this exactly:
-- **"นำเข้าไฟล์ Excel" (Import)**, in Chrome/Edge, now uses `window.showOpenFilePicker()` (a
-  read+write handle) instead of a plain `<input type="file">` — the same handle is kept
-  (`fileHandleRef`, shared between Import and Export) and reused by Export, so exporting later
-  in the same session **overwrites that same file directly**, no second "pick a save location"
-  step. Firefox/Safari (no File System Access API) fall back to the original `<input
-  type="file">` picker for Import; Export from those browsers falls back to a classic download
-  (unaffected, unchanged from before).
-- Export-first with no prior Import (starting from the built-in mock data, or a Firefox/Safari
-  session) behaves exactly as before this change: `showSaveFilePicker` prompts for a location
-  on first export, then reuses that handle for subsequent exports in the same session.
+**Local-file-bridge import — BUILT, briefly upgraded to a unified Import+Export file handle,
+then that unification was REVERSED at the user's explicit request.** The original SharePoint
+workflow reasoning (IT keeps one "Output" folder holding a single round-tripped file, re-uploaded
+under the same filename each time) motivated a period where Import and Export shared one
+`fileHandleRef`, and Export silently overwrote whatever file was last picked/imported, with a
+"เปลี่ยนไฟล์ปลายทาง" link to reset it. **That link turned out confusing in practice** — mutating a
+`ref` doesn't trigger a React re-render, so clicking it visibly did nothing (a real bug, fixed
+once — see the `isRowPassing`-adjacent bug-fix entry above) — and shortly after fixing that, the
+user decided they'd rather **always be prompted for a destination on every single export**, no
+memory at all. Current behavior:
+- **`writeExportFile(displayRows)`** (no longer takes a `fileHandleRef` param) always calls
+  `window.showSaveFilePicker()` fresh on Chrome/Edge — every export shows the native save dialog,
+  every time. No handle is ever kept between exports. Firefox/Safari (no File System Access API)
+  and any `file://` open (§3) fall back to a classic download, unchanged.
+- **"นำเข้าไฟล์ Excel" (Import)**, in Chrome/Edge, still uses `window.showOpenFilePicker()` rather
+  than a plain `<input type="file">` — but the picked handle is now used only to read the file
+  (`handle.getFile()`) and is **not stored anywhere afterward**; it has no bearing on Export.
+- **Do not reintroduce a shared/remembered file handle between Import and Export, or any
+  "reuse last destination" behavior for Export** — this was tried, then explicitly reversed. If a
+  future request asks for "remember my last export location" again, treat it as a genuinely new
+  ask, not a revert to old code (the old `hasFileHandle`/`fileHandleRef`-in-`App()` machinery was
+  fully deleted, not just hidden).
 - **Columns are matched by header name**, not position — required columns must match exactly by
   name; see the column list below for exactly which. `findMissingImportColumns` /
   `parseImportedRows` in `index.html` are the source of truth.
@@ -456,18 +463,16 @@ that same-named file, edits, re-uploads again, and so on. To match this exactly:
   above. The single-round-tripped-file model described here actually *helps* enforce "one owner
   at a time" as a side effect, but the app still can't detect or merge two people editing
   independently if the process discipline breaks down.
-- **Bug fixed: "เปลี่ยนไฟล์ปลายทาง" (change destination file) link in the export confirm dialog
-  did nothing visible when clicked.** Root cause: its `onClick` only mutated `fileHandleRef.current
-  = null` — mutating a `ref` does **not** trigger a React re-render, so the dialog's text stayed
-  on "จะอัปเดตไฟล์เดิมที่เลือกไว้..." even though the click "worked" internally. Fixed by adding a
-  parallel `hasFileHandle` **state** (`useState`, not a ref) that the dialog's conditional actually
-  reads, kept in sync at every point `fileHandleRef.current` is set: `confirmExport()` (after
-  `writeExportFile()` returns, since it may set or clear the ref internally on success/stale-handle
-  error), `importViaFilePicker()` (on successful import), and the "เปลี่ยนไฟล์ปลายทาง" click itself.
-  The ref remains the actual source of truth for the real `FileSystemFileHandle` object (not
-  serializable into state) used by the async write/import logic — `hasFileHandle` exists purely to
-  make the UI re-render when that ref changes. **General lesson for this codebase: never gate JSX
-  rendering on a ref's `.current` value directly — it won't update the screen.**
+- **Historical bug (now moot — the whole mechanism it applied to was later removed, see the
+  "REVERSED at the user's request" bullet above): "เปลี่ยนไฟล์ปลายทาง" (change destination file)
+  link in the export confirm dialog did nothing visible when clicked.** Root cause: its `onClick`
+  only mutated `fileHandleRef.current = null` — mutating a `ref` does **not** trigger a React
+  re-render, so the dialog's text stayed on "จะอัปเดตไฟล์เดิมที่เลือกไว้..." even though the click
+  "worked" internally. Fixed at the time with a parallel `hasFileHandle` state; **both the ref and
+  the state, and the link itself, were deleted entirely soon after** when Export was changed to
+  always prompt fresh. Kept here only for the general lesson, which still applies to any future
+  ref-driven UI in this codebase: **never gate JSX rendering on a ref's `.current` value directly
+  — it won't update the screen.**
 
 **Excel column spec — CONFIRMED against IT's real production file, not a placeholder anymore.**
 The user supplied a real file, `inv_for_validation.xlsx` (546 real rows, 20 columns), generated

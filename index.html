@@ -1345,10 +1345,12 @@ function buildExportWorkbook(displayRows) {
   return wb;
 }
 
-// Writes the export in place to a file the user picked once (via the File System Access API,
-// Chrome/Edge only — reusing the same handle on every export instead of downloading a new
-// dated file each time). Falls back to a normal download when that API isn't available (e.g.
-// Firefox/Safari) or the user cancels the picker.
+// Writes the export via the File System Access API's save picker (Chrome/Edge only) when
+// available, falling back to a normal download otherwise (Firefox/Safari, or file:// — see
+// below). Always prompts fresh, every export — the earlier "remember the picked file and
+// silently overwrite it on later exports" behavior (with a "เปลี่ยนไฟล์ปลายทาง" link to reset it)
+// was explicitly removed at the user's request: always let the user choose the destination.
+// **Do not reintroduce a remembered/reused file handle for export.**
 // The File System Access API (showOpenFilePicker/showSaveFilePicker) reports as available
 // under file:// origins in Chromium/Edge, but writes made via createWritable() have been
 // observed to silently produce a corrupted .xlsx (no error thrown, but Excel reports "file
@@ -1361,25 +1363,23 @@ function supportsFileSystemAccess() {
   return location.protocol !== "file:" && !!window.showOpenFilePicker && !!window.showSaveFilePicker;
 }
 
-async function writeExportFile(displayRows, fileHandleRef) {
+async function writeExportFile(displayRows) {
   const wb = buildExportWorkbook(displayRows);
 
   if (supportsFileSystemAccess()) {
     try {
-      if (!fileHandleRef.current) {
-        fileHandleRef.current = await window.showSaveFilePicker({
-          suggestedName: "Item_Mapping_Validated.xlsx",
-          types: [{ description: "Excel file", accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }],
-        });
-      }
+      const handle = await window.showSaveFilePicker({
+        suggestedName: "Item_Mapping_Validated.xlsx",
+        types: [{ description: "Excel file", accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }],
+      });
       const bytes = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-      const writable = await fileHandleRef.current.createWritable();
+      const writable = await handle.createWritable();
       await writable.write(bytes);
       await writable.close();
       return true;
     } catch (err) {
       if (err && err.name === "AbortError") return false; // user cancelled the picker
-      fileHandleRef.current = null; // handle went stale/invalid — fall back below
+      // any other error: fall through to the classic download below
     }
   }
 
@@ -1528,18 +1528,11 @@ function App() {
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
   const [importError, setImportError] = useState("");
-  // Mirrors fileHandleRef.current for rendering purposes only — mutating a ref doesn't trigger a
-  // re-render, so the export dialog's "จะอัปเดตไฟล์เดิม.../เปลี่ยนไฟล์ปลายทาง" text needs this
-  // separate state to actually update on screen when the handle is set/cleared. The ref itself
-  // stays the source of truth for the actual FileSystemFileHandle object (not serializable into
-  // state) used by writeExportFile()/importViaFilePicker().
-  const [hasFileHandle, setHasFileHandle] = useState(false);
   const [supplierMaster, setSupplierMaster] = useState(FALLBACK_SUPPLIER_MASTER);
   const [supplierMasterSource, setSupplierMasterSource] = useState("built-in");
   const loadTimerRef = useRef(null);
   const toastTimerRef = useRef(null);
   const importInputRef = useRef(null);
-  const fileHandleRef = useRef(null);
 
   useEffect(() => {
     loadTimerRef.current = setTimeout(() => {
@@ -1630,15 +1623,10 @@ function App() {
     }));
   }
   async function confirmExport() {
-    const wrote = await writeExportFile(displayRows, fileHandleRef);
+    const wrote = await writeExportFile(displayRows);
     if (!wrote) return; // user cancelled the file picker — leave state untouched
-    setHasFileHandle(!!fileHandleRef.current);
     setShowExportConfirm(false);
-    fireToast(
-      fileHandleRef.current
-        ? "อัปเดตไฟล์ Excel สำเร็จแล้ว"
-        : "เสร็จสิ้นและส่งออกข้อมูลสำเร็จแล้ว"
-    );
+    fireToast("เสร็จสิ้นและส่งออกข้อมูลสำเร็จแล้ว");
     clearPersistedRows();
   }
 
@@ -1685,9 +1673,6 @@ function App() {
     }
   }
 
-  // Picks a file with read+write access so the SAME handle can later be reused by Export —
-  // matches the real workflow (one file round-tripped in place, same name every time) instead
-  // of importing from one file and exporting to a differently-named new one.
   async function importViaFilePicker() {
     setImportError("");
     try {
@@ -1696,8 +1681,7 @@ function App() {
         multiple: false,
       });
       const file = await handle.getFile();
-      const ok = await importFromFile(file);
-      if (ok) { fileHandleRef.current = handle; setHasFileHandle(true); } // only repoint future exports on a successful parse
+      await importFromFile(file);
     } catch (err) {
       if (err && err.name === "AbortError") return; // user cancelled the picker
       setImportError("ไม่สามารถอ่านไฟล์นี้ได้ กรุณาตรวจสอบว่าเป็นไฟล์ Excel (.xlsx) ที่ถูกต้อง");
@@ -2127,15 +2111,9 @@ function App() {
               </p>
             )}
             {supportsFileSystemAccess() ? (
-              <p style={{ fontSize: 12, margin: 0, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                {hasFileHandle
-                  ? <React.Fragment>จะอัปเดตไฟล์เดิมที่เลือกไว้ ({" "}
-                      <span style={{ cursor: "pointer", textDecoration: "underline", color: "var(--color-accent)" }} onClick={() => { fileHandleRef.current = null; setHasFileHandle(false); }}>เปลี่ยนไฟล์ปลายทาง</span>
-                      {" "})</React.Fragment>
-                  : "ครั้งแรกจะให้เลือกตำแหน่งไฟล์ปลายทาง — ครั้งต่อไปจะอัปเดตไฟล์เดิมนั้นให้อัตโนมัติ"}
-              </p>
+              <p style={{ fontSize: 12, margin: 0, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>จะให้เลือกตำแหน่งไฟล์ปลายทางทุกครั้งที่ส่งออก</p>
             ) : (
-              <p style={{ fontSize: 12, margin: 0, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>เบราว์เซอร์นี้จะดาวน์โหลดเป็นไฟล์ใหม่ทุกครั้ง (อัปเดตไฟล์เดิมอัตโนมัติได้เฉพาะ Chrome/Edge)</p>
+              <p style={{ fontSize: 12, margin: 0, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>เบราว์เซอร์นี้จะดาวน์โหลดเป็นไฟล์ใหม่ทุกครั้ง</p>
             )}
             <div className="dialog-actions">
               <button className="btn btn-secondary" onClick={() => setShowExportConfirm(false)}>ยกเลิก</button>
