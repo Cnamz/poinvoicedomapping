@@ -303,15 +303,35 @@ considered.
   **Parsing gotcha found during testing, don't reintroduce**: the real Excel's `"supplier name"`
   column is a short internal mnemonic code (`"JWT"`, `"KTMT"`, ...), **not** the full Thai company
   name — using it as the parsed key produced 0 auto-resolved rows (nothing matched). The real
-  full name — the one that must match an Invoice file's own `"Supplier Name"` column — is in the
-  **`"Oracle Supplier Name"`** column instead. `parseSupplierMasterRows()` reads from that column;
-  verified against the real 546-row invoice file that this reproduces the exact same
-  auto-resolve counts (514 confirmed) as the original hardcoded `SUPPLIER_MASTER`.
+  full name — the one that must match an Invoice file's own `"Supplier Name"` column — was in the
+  **`"Oracle Supplier Name"`** column instead in that old source file.
+  **Column spec revised again — a clean 4-column ask, handed to IT directly, not derived from an
+  existing Excel this time.** The user showed a screenshot of how Oracle's own team stores the
+  RVN↔supplier item mapping (a DFF export: header row 8, pipe-delimited `"code|name"` combined
+  fields, `FG Item`/RVN-style internal codes) — evaluated and **rejected** as the format to build
+  a parser around, both because it reintroduces RVN-adjacent data (§3 — explicitly out of scope)
+  and because combined delimited fields are fragile to parse. Instead, agreed a clean ask to
+  relay to IT: **`Supplier Name`, `Supplier Item Code`, `Supplier Item Name`, `Supplier Item
+  UOM`** — one row per supplier-item pair, header on row 1, no RVN/FG Item column needed.
+  `Supplier Item UOM` should exist as a column even before Oracle actually tracks UOM data (per
+  the user: "IT should create the column now, values can stay blank until later") — the parser
+  already handles blank UOM gracefully (many `FALLBACK_SUPPLIER_MASTER` entries already have
+  `supplierUom: ""`), so no code change was needed for that specific ask, only for the header
+  names below.
+  `parseSupplierMasterRows()` now reads each field with **new-name-first, old-name-fallback**
+  (`raw["Supplier Name"] ?? raw["Oracle Supplier Name"]`, and similarly for Item
+  Code/Name/UOM) — the currently-deployed `supplier_master.xlsx` (still in the OLD "Supplier item
+  master update 1.xlsx" shape) keeps working via the fallback names until IT delivers a real file
+  in the new 4-column shape; verified both the old-format file (546-row invoice test: 514
+  auto-resolved, unchanged) and a hand-built new-format file (with an intentionally blank UOM)
+  parse correctly. **Once a real new-format file from IT is confirmed working in production, the
+  old fallback header names can be deleted from `parseSupplierMasterRows()`** — not urgent, but
+  don't be surprised to find both present; that's intentional dual-support, not leftover cruft.
   **Deployment note**: whoever deploys this app for real needs to place an actual
   `supplier_master.xlsx` next to `index.html` for auto-fetch to find anything (a dev copy exists
-  in this project folder already, copied from "Supplier item master update 1.xlsx" — same
-  column structure, don't rename or reshape it) — this is a manual step outside the app itself,
-  not automated by any build process (there is no build process, §1).
+  in this project folder already, copied from "Supplier item master update 1.xlsx" — old-format
+  shape, works via the fallback header names above) — this is a manual step outside the app
+  itself, not automated by any build process (there is no build process, §1).
 - The broader RVN Item Master reference (1,361 items, English descriptions, Product
   Type/Category hierarchy) lives in **"Copy of RVN Inventory Org Structure Updated_Y2026
   (3).xlsb"**, sheet **"Final"** — was never wired into the app, and per the RVN-removal decision

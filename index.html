@@ -606,22 +606,26 @@ const SUPPLIER_MASTER_FILENAME = "supplier_master.xlsx";
 
 // Parses a raw Supplier Master worksheet (SheetJS sheet_to_json rows) into the same
 // { [supplierName]: [{supplierItemCode, supplierItemName, supplierUom}, ...] } shape as
-// FALLBACK_SUPPLIER_MASTER. Column headers match the real source file ("Supplier item master
-// update 1.xlsx"). The supplier's full Thai company name — the one that must match the
-// Invoice's own "Supplier Name" column exactly (§4/§5) — is in "Oracle Supplier Name", NOT the
-// "supplier name" column (that one is just a short internal mnemonic code like "JWT"/"KTMT" —
-// caught during testing: using it produced 0 auto-resolved rows since it never matches anything
-// in an imported invoice file). Extra columns (supplier code, Oracle Supplier Number, RVN item
-// code/name/UOM) are ignored — RVN fields are deliberately not carried into this app (§3).
+// FALLBACK_SUPPLIER_MASTER. Preferred headers ("Supplier Name" / "Supplier Item Code" /
+// "Supplier Item Name" / "Supplier Item UOM") are the clean 4-column spec agreed with the user
+// to hand to IT — flat columns, header row 1, no Oracle DFF pipe-delimited fields, no RVN/FG
+// Item codes (deliberately excluded, §3). Each field also falls back to the OLD source file's
+// header text ("Oracle Supplier Name" / "supplier item code" / "supplier item name" / "supplier
+// item UOM (INV)") so the currently-deployed `supplier_master.xlsx` (copied from "Supplier item
+// master update 1.xlsx") keeps working until IT delivers a file in the new format — once that
+// happens the old fallback names can be deleted, but don't remove them pre-emptively. Note: the
+// supplier's full Thai company name must match the Invoice file's own "Supplier Name" column
+// exactly — a past bug used the OLD file's plain "supplier name" column, which is actually just
+// a short internal mnemonic code ("JWT"/"KTMT"), not the real name; don't reintroduce that key.
 function parseSupplierMasterRows(sheetRows) {
   const master = {};
   sheetRows.forEach(raw => {
-    const supplierName = String(raw["Oracle Supplier Name"] || "").trim();
+    const supplierName = String(raw["Supplier Name"] ?? raw["Oracle Supplier Name"] ?? "").trim();
     if (!supplierName) return;
     const item = {
-      supplierItemCode: raw["supplier item code"] !== undefined && raw["supplier item code"] !== null ? String(raw["supplier item code"]).trim() : "",
-      supplierItemName: String(raw["supplier item name"] || "").trim(),
-      supplierUom: raw["supplier item UOM (INV)"] !== undefined && raw["supplier item UOM (INV)"] !== null ? String(raw["supplier item UOM (INV)"]).trim() : "",
+      supplierItemCode: String(raw["Supplier Item Code"] ?? raw["supplier item code"] ?? "").trim(),
+      supplierItemName: String(raw["Supplier Item Name"] ?? raw["supplier item name"] ?? "").trim(),
+      supplierUom: String(raw["Supplier Item UOM"] ?? raw["supplier item UOM (INV)"] ?? "").trim(),
     };
     if (!item.supplierItemName) return;
     if (!master[supplierName]) master[supplierName] = [];
