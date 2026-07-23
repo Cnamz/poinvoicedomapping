@@ -2110,9 +2110,7 @@ function App() {
                 ยังมี {unconfirmedReview} แถวที่ยังไม่ได้ตรวจ ต้องการส่งออกต่อหรือไม่?
               </p>
             )}
-            {supportsFileSystemAccess() ? (
-              <p style={{ fontSize: 12, margin: 0, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>จะให้เลือกตำแหน่งไฟล์ปลายทางทุกครั้งที่ส่งออก</p>
-            ) : (
+            {!supportsFileSystemAccess() && (
               <p style={{ fontSize: 12, margin: 0, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>เบราว์เซอร์นี้จะดาวน์โหลดเป็นไฟล์ใหม่ทุกครั้ง</p>
             )}
             <div className="dialog-actions">

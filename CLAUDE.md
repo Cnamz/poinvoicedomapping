@@ -429,7 +429,12 @@ memory at all. Current behavior:
 - **`writeExportFile(displayRows)`** (no longer takes a `fileHandleRef` param) always calls
   `window.showSaveFilePicker()` fresh on Chrome/Edge — every export shows the native save dialog,
   every time. No handle is ever kept between exports. Firefox/Safari (no File System Access API)
-  and any `file://` open (§3) fall back to a classic download, unchanged.
+  and any `file://` open (§3) fall back to a classic download, unchanged. The export confirm
+  dialog no longer has any explanatory text for the Chrome/Edge case either (removed at the
+  user's request, "ไม่ต้องมีคำพูด") — only the Firefox/Safari/`file://` fallback still shows its
+  "เบราว์เซอร์นี้จะดาวน์โหลดเป็นไฟล์ใหม่ทุกครั้ง" line, since that one explains genuinely
+  different behavior worth flagging; the Chrome/Edge case is self-evident once the native picker
+  appears, no caption needed.
 - **"นำเข้าไฟล์ Excel" (Import)**, in Chrome/Edge, still uses `window.showOpenFilePicker()` rather
   than a plain `<input type="file">` — but the picked handle is now used only to read the file
   (`handle.getFile()`) and is **not stored anywhere afterward**; it has no bearing on Export.
