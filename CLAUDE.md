@@ -436,6 +436,18 @@ that same-named file, edits, re-uploads again, and so on. To match this exactly:
   above. The single-round-tripped-file model described here actually *helps* enforce "one owner
   at a time" as a side effect, but the app still can't detect or merge two people editing
   independently if the process discipline breaks down.
+- **Bug fixed: "เปลี่ยนไฟล์ปลายทาง" (change destination file) link in the export confirm dialog
+  did nothing visible when clicked.** Root cause: its `onClick` only mutated `fileHandleRef.current
+  = null` — mutating a `ref` does **not** trigger a React re-render, so the dialog's text stayed
+  on "จะอัปเดตไฟล์เดิมที่เลือกไว้..." even though the click "worked" internally. Fixed by adding a
+  parallel `hasFileHandle` **state** (`useState`, not a ref) that the dialog's conditional actually
+  reads, kept in sync at every point `fileHandleRef.current` is set: `confirmExport()` (after
+  `writeExportFile()` returns, since it may set or clear the ref internally on success/stale-handle
+  error), `importViaFilePicker()` (on successful import), and the "เปลี่ยนไฟล์ปลายทาง" click itself.
+  The ref remains the actual source of truth for the real `FileSystemFileHandle` object (not
+  serializable into state) used by the async write/import logic — `hasFileHandle` exists purely to
+  make the UI re-render when that ref changes. **General lesson for this codebase: never gate JSX
+  rendering on a ref's `.current` value directly — it won't update the screen.**
 
 **Excel column spec — CONFIRMED against IT's real production file, not a placeholder anymore.**
 The user supplied a real file, `inv_for_validation.xlsx` (546 real rows, 20 columns), generated

@@ -1524,6 +1524,12 @@ function App() {
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
   const [importError, setImportError] = useState("");
+  // Mirrors fileHandleRef.current for rendering purposes only — mutating a ref doesn't trigger a
+  // re-render, so the export dialog's "จะอัปเดตไฟล์เดิม.../เปลี่ยนไฟล์ปลายทาง" text needs this
+  // separate state to actually update on screen when the handle is set/cleared. The ref itself
+  // stays the source of truth for the actual FileSystemFileHandle object (not serializable into
+  // state) used by writeExportFile()/importViaFilePicker().
+  const [hasFileHandle, setHasFileHandle] = useState(false);
   const [supplierMaster, setSupplierMaster] = useState(FALLBACK_SUPPLIER_MASTER);
   const [supplierMasterSource, setSupplierMasterSource] = useState("built-in");
   const loadTimerRef = useRef(null);
@@ -1622,6 +1628,7 @@ function App() {
   async function confirmExport() {
     const wrote = await writeExportFile(displayRows, fileHandleRef);
     if (!wrote) return; // user cancelled the file picker — leave state untouched
+    setHasFileHandle(!!fileHandleRef.current);
     setShowExportConfirm(false);
     fireToast(
       fileHandleRef.current
@@ -1686,7 +1693,7 @@ function App() {
       });
       const file = await handle.getFile();
       const ok = await importFromFile(file);
-      if (ok) fileHandleRef.current = handle; // only repoint future exports on a successful parse
+      if (ok) { fileHandleRef.current = handle; setHasFileHandle(true); } // only repoint future exports on a successful parse
     } catch (err) {
       if (err && err.name === "AbortError") return; // user cancelled the picker
       setImportError("ไม่สามารถอ่านไฟล์นี้ได้ กรุณาตรวจสอบว่าเป็นไฟล์ Excel (.xlsx) ที่ถูกต้อง");
@@ -2117,9 +2124,9 @@ function App() {
             )}
             {supportsFileSystemAccess() ? (
               <p style={{ fontSize: 12, margin: 0, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                {fileHandleRef.current
+                {hasFileHandle
                   ? <React.Fragment>จะอัปเดตไฟล์เดิมที่เลือกไว้ ({" "}
-                      <span style={{ cursor: "pointer", textDecoration: "underline", color: "var(--color-accent)" }} onClick={() => { fileHandleRef.current = null; }}>เปลี่ยนไฟล์ปลายทาง</span>
+                      <span style={{ cursor: "pointer", textDecoration: "underline", color: "var(--color-accent)" }} onClick={() => { fileHandleRef.current = null; setHasFileHandle(false); }}>เปลี่ยนไฟล์ปลายทาง</span>
                       {" "})</React.Fragment>
                   : "ครั้งแรกจะให้เลือกตำแหน่งไฟล์ปลายทาง — ครั้งต่อไปจะอัปเดตไฟล์เดิมนั้นให้อัตโนมัติ"}
               </p>
