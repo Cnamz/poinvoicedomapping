@@ -1616,8 +1616,6 @@ function App() {
   const importInputRef = useRef(null);
   const dragStateRef = useRef(null);
   const tableScrollRef = useRef(null);
-  const phantomScrollRef = useRef(null);
-  const isSyncingScrollRef = useRef(false);
   const optionRefs = useRef({});
 
   useEffect(() => {
@@ -1658,31 +1656,6 @@ function App() {
     persistRows(rows);
   }, [rows]);
 
-  // Measures the real table's scroll width so the fixed bottom "phantom" scrollbar (§
-  // requirement 2) knows whether to render and how wide its spacer div should be. Depends on
-  // tableVisible (mirrors showTable's own isLoading/hasError/rows.length logic, computed here
-  // since showTable itself isn't available yet this early in the function) rather than just
-  // rows.length — rows.length alone missed the real case where rows finish importing while
-  // isLoading's initial 900ms skeleton timer hasn't cleared yet: rows.length changes first
-  // (effect fires, ref still null since the table wrapper isn't rendered until isLoading
-  // clears), then isLoading clears in a *separate* render with no rows.length change, so the
-  // rows.length-only effect never re-fired and the measurement stayed stuck at 0. Do not
-  // narrow this dependency back to [rows.length] alone.
-  const [tableScrollWidth, setTableScrollWidth] = useState(0);
-  const [tableClientWidth, setTableClientWidth] = useState(0);
-  const tableVisible = !isLoading && !hasError && rows.length > 0;
-  useEffect(() => {
-    function measure() {
-      if (tableScrollRef.current) {
-        setTableScrollWidth(tableScrollRef.current.scrollWidth);
-        setTableClientWidth(tableScrollRef.current.clientWidth);
-      }
-    }
-    measure();
-    const raf = requestAnimationFrame(measure);
-    window.addEventListener("resize", measure);
-    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", measure); };
-  }, [tableVisible, rows.length]);
 
   function retryLoad() {
     setIsLoading(true);
@@ -2014,18 +1987,21 @@ function App() {
         {isOpen && (
           <div
             className="dialog"
-            // Fixed height (not just maxHeight) + overflow:hidden on this outer box (§ bug fix:
-            // a column with many distinct values, e.g. Invoice No. on a real ~500+ row file,
-            // otherwise balloons the popover past the viewport instead of scrolling — the
-            // OK/Cancel buttons end up pushed off-screen and the popover looks "broken/empty").
-            // minHeight:0 on the checkbox-list div below is the other half of this fix — a flex
-            // child's default min-height:auto otherwise overrides its own maxHeight/overflow,
-            // a classic flexbox gotcha. Do not remove either half.
-            style={{ position: "absolute", top: "100%", left: 0, zIndex: 45, width: 230, height: 320, overflow: "hidden", padding: 10, marginTop: 4, gap: 6, fontWeight: 400, textTransform: "none", letterSpacing: "normal" }}
+            // Every sub-section below has a literal fixed pixel height (search 28, select-all
+            // 24, list exactly 180, actions 26) instead of relying on flexbox to distribute
+            // space — the previous flex:"1 1 auto"/minHeight:0 approach still let the box's
+            // rendered size vary with content in some layouts (real bug report + screenshot
+            // from the user: at a narrow browser window the box still visibly grew/shrank with
+            // content instead of staying fixed). `display:"block"` overrides the `.dialog`
+            // class's `display:flex` for this specific popover so none of this is flex-computed
+            // at all. Total content height (28+24+180+26 + 3×6 gaps via margin = 276) plus
+            // 20px padding (10 top+bottom) = 296, comfortably under the outer `height:320` —
+            // if any of these fixed numbers change, keep the sum under 320 or raise it to match.
+            style={{ position: "absolute", top: "100%", left: 0, zIndex: 45, width: 230, height: 320, overflow: "hidden", padding: 10, marginTop: 4, display: "block", fontWeight: 400, textTransform: "none", letterSpacing: "normal" }}
             onClick={e => e.stopPropagation()}
           >
-            <input className="input" style={{ fontSize: 12, padding: "4px 8px", minHeight: "auto", flex: "none" }} placeholder="ค้นหาค่า..." value={filterSearchQuery} onChange={e => setFilterSearchQuery(e.target.value)} onKeyDown={e => { if (e.key === "Escape") closeFilterPopover(); }} autoFocus />
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "4px 2px", borderBottom: "1px solid var(--color-divider)", cursor: "pointer", flex: "none" }}>
+            <input className="input" style={{ fontSize: 12, padding: "4px 8px", height: 28, boxSizing: "border-box" }} placeholder="ค้นหาค่า..." value={filterSearchQuery} onChange={e => setFilterSearchQuery(e.target.value)} onKeyDown={e => { if (e.key === "Escape") closeFilterPopover(); }} autoFocus />
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, height: 24, marginTop: 6, padding: "2px", borderBottom: "1px solid var(--color-divider)", cursor: "pointer", boxSizing: "border-box" }}>
               <input
                 type="checkbox"
                 checked={allChecked}
@@ -2033,15 +2009,15 @@ function App() {
               />
               (เลือกทั้งหมด)
             </label>
-            <div style={{ overflow: "auto", flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+            <div style={{ overflowY: "auto", overflowX: "hidden", height: 180, marginTop: 6 }}>
               {visibleValues.map(v => (
-                <label key={v || "(blank)"} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "3px 2px", cursor: "pointer", flex: "none" }}>
+                <label key={v || "(blank)"} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "3px 2px", cursor: "pointer" }}>
                   <input type="checkbox" checked={draft.has(v)} onChange={() => toggleDraftValue(v)} />
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v || "(ว่าง)"}</span>
                 </label>
               ))}
             </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 4, flex: "none" }}>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, height: 26, marginTop: 6 }}>
               <button className="btn btn-secondary" style={{ fontSize: 11, padding: "3px 10px" }} onClick={closeFilterPopover}>Cancel</button>
               <button className="btn btn-primary" style={{ fontSize: 11, padding: "3px 10px" }} onClick={() => commitFilterDraft(field, allValues)}>OK</button>
             </div>
@@ -2258,12 +2234,6 @@ function App() {
           <div
             ref={tableScrollRef}
             style={{ overflowX: "auto", overflowY: "visible", border: "1px solid var(--color-divider)", borderRadius: "var(--radius-md)", position: "relative", background: "var(--color-bg)" }}
-            onScroll={e => {
-              if (isSyncingScrollRef.current) return;
-              isSyncingScrollRef.current = true;
-              if (phantomScrollRef.current) phantomScrollRef.current.scrollLeft = e.target.scrollLeft;
-              isSyncingScrollRef.current = false;
-            }}
           >
             <table className="table" style={{ minWidth: 1790, tableLayout: "fixed", borderCollapse: "separate", borderSpacing: 0 }}>
               <thead>
@@ -2394,21 +2364,6 @@ function App() {
           </div>
         </div>
       )}
-      {showTable && tableScrollWidth > tableClientWidth && (
-        <div
-          ref={phantomScrollRef}
-          style={{ position: "fixed", left: 0, right: 0, bottom: 0, height: 16, overflowX: "auto", overflowY: "hidden", zIndex: 40, background: "var(--color-bg)", borderTop: "1px solid var(--color-divider)" }}
-          onScroll={e => {
-            if (isSyncingScrollRef.current) return;
-            isSyncingScrollRef.current = true;
-            if (tableScrollRef.current) tableScrollRef.current.scrollLeft = e.target.scrollLeft;
-            isSyncingScrollRef.current = false;
-          }}
-        >
-          <div style={{ height: 1, width: tableScrollWidth }}></div>
-        </div>
-      )}
-
       {!!openFilterCol && (
         <div style={{ position: "fixed", inset: 0, zIndex: 44 }} onClick={closeFilterPopover}></div>
       )}

@@ -686,19 +686,23 @@ additive but a real shape change per this project's usual bump practice).
    distinct values computed from the full unfiltered `displayRows`, not cascaded against other
    currently-active filters like real Excel does — simpler, still very usable, flagged to the
    user as an implementation simplification rather than asked about up front.
-2. **Fixed horizontal scrollbar at the bottom of the viewport.** The real table scroll wrapper
-   (`overflowX:auto`) already existed; added a synced "phantom" scrollbar
-   (`position:fixed; bottom:0`) so it's reachable at any vertical scroll position on a
-   500+ row table, not just after scrolling all the way down. Only renders when
-   `tableScrollWidth > tableClientWidth` (measured via `tableScrollRef`/`phantomScrollRef` +
-   `isSyncingScrollRef` guard against feedback loops). **Real bug hit during verification**: the
-   measurement effect was originally keyed on `[rows.length]` alone — this missed the case
-   where rows finish importing while `isLoading`'s initial 900ms skeleton timer hasn't cleared
-   yet (rows.length changes first, ref is still null since the table wrapper isn't rendered
-   until `isLoading` clears; `isLoading` then clears in a *separate* render with no
-   `rows.length` change, so the old effect never re-fired and the scrollbar silently never
-   appeared). Fixed by computing `tableVisible` early and depending on `[tableVisible,
-   rows.length]` instead. **Do not narrow this back to `[rows.length]` alone.**
+2. **Fixed horizontal scrollbar at the bottom of the viewport — built, then fully reverted.**
+   Originally added a synced "phantom" scrollbar (`position:fixed; bottom:0`,
+   `phantomScrollRef`/`tableScrollWidth`/`tableClientWidth`/`isSyncingScrollRef`/a
+   `tableVisible`-keyed measurement effect) so the real table's own `overflowX:auto` scrollbar
+   would be reachable at any vertical scroll position on a 500+ row table. It worked (verified
+   at the user's actual narrow browser window), but the user found the thin bar pinned to the
+   very bottom of the viewport hard to notice/register as something you can grab
+   ("สังเกตุยาก") and asked to go back to just the scrollbar attached directly to the table
+   ("อันที่อยู่ติดกล่องเป็นหลัก"). **Fully removed** — all of the state/refs/effect above, the
+   fixed-position spacer div, and the `onScroll` sync handlers on the real table wrapper. The
+   real table wrapper's own native horizontal scrollbar (previously also hidden via a
+   `.table-scroll-hide-bar` CSS class so only the phantom one would show — that class is gone
+   too, from both `index.html` and `styles.css`) is the *only* horizontal scrollbar again, same
+   as before this requirement was ever raised. **Do not reintroduce a phantom/fixed-position
+   scrollbar for this** — it was tried, worked, and was explicitly rejected in favor of the
+   simpler native one. If narrow-viewport reachability comes up again, ask what specifically
+   isn't reachable rather than defaulting back to this approach.
 3. **Keyboard navigation in the Supplier/Item picker.** `highlightIndex` state (resets to 0 on
    dialog open / search change). ArrowUp/ArrowDown move it (clamped, with `scrollIntoView`),
    Enter selects `dialogAllOptions[highlightIndex]`, Escape closes — all wired on the picker's
@@ -805,28 +809,33 @@ AutoFilter as the reference) and against real usage, and asked for 5 changes:
    item" — passing *is* what triggers auto-fill). Tier 3 (<92%, "ให้ user เช็ค") is unchanged.
    This is a single constant change plus comment updates — **do not split it into two separate
    thresholds**, one value is exactly the new rule.
-6. **Filter popover box size — real bug, reported by the user with a screenshot** ("พังอ่ะ อยู่ๆ
-   ก็หาย กดไม่ได้"). On a real file where a column has many distinct values (e.g. `Invoice No.`
-   on a ~500+ row file, close to one distinct value per row), the popover ballooned to fit every
-   checkbox instead of scrolling, pushing the OK/Cancel buttons off-screen — looked "broken", not
-   just tall. Root cause: the outer popover div had `maxHeight: 320` but no `overflow`, and the
-   inner checkbox-list div had its own `maxHeight: 180, overflow: "auto"` but is a flex child of
-   a `display:flex; flexDirection:column` container — a flex item's default `min-height: auto`
-   silently overrides its own `max-height`/`overflow` unless `minHeight: 0` is set explicitly (a
-   classic flexbox trap). Fixed with both halves together: outer popover now `height: 320,
-   overflow: "hidden"` (a **fixed** height, not just a cap) plus `flex: "none"` on the
-   search/select-all/actions rows; inner list `flex: "1 1 auto", minHeight: 0`. Verified by
-   opening the filter on `Invoice No.`/`OCR Result (Description)`/`Matching Model Result`/
-   `Supplier Item Code (OCR)` (all high-cardinality columns) and confirming the popover's
-   `boundingBox()` stays exactly 230×320 and OK/Cancel stay clickable regardless of how many
-   distinct values exist. **Do not drop either half of this fix** (the fixed outer height+overflow,
-   or the inner `minHeight: 0`) — either alone reproduces the bug on a large-enough column.
+6. **Filter popover box size — real bug, took two attempts.** First reported with a screenshot
+   ("พังอ่ะ อยู่ๆ ก็หาย กดไม่ได้") on a real file where a column has many distinct values (e.g.
+   `Invoice No.` on a ~500+ row file, close to one distinct value per row) — the popover
+   ballooned to fit every checkbox instead of scrolling, pushing OK/Cancel off-screen. First fix
+   attempt: outer popover `height: 320, overflow: "hidden"` (a fixed height, not just a cap) plus
+   `flex: "1 1 auto", minHeight: 0` on the inner checkbox-list (a flex item's default
+   `min-height: auto` otherwise silently overrides its own `max-height`/`overflow` — a classic
+   flexbox trap). This passed every Playwright check thrown at it (four different
+   high-cardinality columns, a narrow 830×650 viewport matching the user's actual window,
+   `boundingBox()` confirmed 230×320 every time) — but the user reported it "still broken" at
+   their actual narrow browser window ("เหมือนกล่องมันจะ dynamic ตามของที่โชว์"), a discrepancy
+   never fully root-caused in the flex version. **Final fix: removed flexbox from this popover
+   entirely.** `display: "block"` overrides the `.dialog` class's `display:flex` for this one
+   popover; every sub-section (search input, select-all row, checkbox list, action buttons) now
+   has a literal fixed pixel height (28 / 24 / 180 / 26, with fixed margins between) instead of
+   any flex-computed sizing — the checkbox list is `height: 180` (not `maxHeight`, not
+   `flex-grow`) with plain `overflow-y: auto`. Re-verified at the exact narrow viewport
+   (830×650) after this change. **Do not reintroduce flexbox (`display:flex`, `flex-grow`, or
+   percentage/auto heights) inside this popover** — go back to the flex version only if you can
+   also reproduce and fix whatever made it still vary for the user, which the block-layout
+   version sidesteps entirely by construction.
 
 Verified end-to-end via Playwright against real files (546-row and a 539-row file the user
 generated after filtering some rows upstream) after this round: uncheck-then-OK correctly filters
 (90 rows for Fuzzy-only), Cancel correctly discards an in-progress draft, (เลือกทั้งหมด) correctly
 toggles both directions, selecting zero values + OK correctly shows 0 rows, the free-text export
 file was inspected directly (`openpyxl`) to confirm exactly the 7 requested headers, and the
-filter popover holds a fixed size on every high-cardinality column tried. Confirmed count went
-515 → 516 on the same file after the CER widening (one real Fuzzy row moved from the CER 7.5–9
-"ต้องตรวจ" bucket into auto-passing).
+filter popover holds a fixed 230×320 size on every high-cardinality column tried, including at
+the user's actual narrow window size. Confirmed count went 515 → 516 on the same file after the
+CER widening (one real Fuzzy row moved from the CER 7.5–9 "ต้องตรวจ" bucket into auto-passing).
