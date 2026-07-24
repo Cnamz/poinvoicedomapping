@@ -839,3 +839,72 @@ file was inspected directly (`openpyxl`) to confirm exactly the 7 requested head
 filter popover holds a fixed 230×320 size on every high-cardinality column tried, including at
 the user's actual narrow window size. Confirmed count went 515 → 516 on the same file after the
 CER widening (one real Fuzzy row moved from the CER 7.5–9 "ต้องตรวจ" bucket into auto-passing).
+
+## 9c. Filter popover — real root cause found + reachable horizontal scrollbar (2026-07)
+
+Despite §9b item 6's fixed-pixel-height rewrite passing every local Playwright check, the user
+kept reporting the popover broken on their actual live site after confirmed `git push` + hard
+refresh — and then sent three screenshots from the *same browsing session* where the popover
+rendered correctly for one column but showed the old broken symptom for another. That combination
+(deployed code confirmed current + correct-and-broken in the same session) ruled out both
+deployment lag and a pure sizing bug, and pointed at something positional/environmental instead.
+
+**Root cause: `position:"absolute"` anchored via the `<th>`'s `position:"relative"` is not a
+reliable containing block for the popover across every browser engine/layout situation** — some
+engines can resolve the containing block to a farther ancestor (the `<table>`, the scrolling
+wrapper) instead of the `<th>` itself, which would explain a popover intermittently rendering at
+the wrong size/position with no code or data change involved. **Fix: the popover is now
+`position:"fixed"`, with `top`/`left` computed via `getBoundingClientRect()` on the filter button
+itself, captured at click time** (`openFilterPopover(field, btnEl)` — the funnel `<button>` passes
+`e.currentTarget`). `position:fixed` coordinates are viewport-relative and don't depend on any
+ancestor being a correct containing block, sidestepping the whole bug class. `filterPopoverPos`
+state (`{top, left}`) holds the computed spot; `left` is clamped to stay on-screen
+(`Math.min(rect.left, window.innerWidth - 250)`, floored at 10), and `top` flips to open *above*
+the button instead of below if there isn't 320px of room underneath. **Do not go back to
+`position:"absolute"`/`top:"100%"` anchored off the `<th>` for this popover.**
+
+Making the popover `position:fixed` surfaced a second, genuinely new bug when combined with the
+sticky table header added in this same round (below): the `<th>` cells are `position:"sticky"`
+with their own `zIndex`, which makes each `<th>` establish its own CSS stacking context — and a
+`position:fixed` descendant still computes its on-screen position relative to the viewport but
+does **not** escape an ancestor's stacking context for paint/click order. That left the popover
+visually in the right place but with its clicks silently swallowed by the page's full-screen
+click-outside backdrop (`zIndex: 44`, rendered elsewhere in the DOM), since the popover's
+`zIndex: 45` was only being compared against siblings *inside* the sticky `<th>`, not against that
+backdrop. Fix: the popover renders via `ReactDOM.createPortal(..., document.body)` instead of as
+an in-place child of the `<th>`, making it a true top-level DOM sibling of the backdrop so normal
+z-index comparison (45 > 44) applies. **If the popover is ever moved back to an in-place (non-
+portal) render, it will silently stop being clickable again as soon as any ancestor `<th>`/wrapper
+has its own z-index — keep the portal.**
+
+**Separately, the user also asked for the horizontal scrollbar to be reachable without scrolling
+to the very bottom of the page** ("ถ้าสินค้าเยอะๆ มันต้องเลื่อนไปล่างสุดเพื่อจะเลื่อนซ้ายขวา ไม่สะดวกเลย") — a
+real usability problem with the table wrapper's old `overflowY:"visible"`, which let the table
+grow to its full ~500+-row height, pushing its own horizontal scrollbar to the bottom of a very
+tall page. This is a *different* problem from §9's item 2 (a phantom scrollbar fixed to the
+viewport bottom, tried and fully reverted earlier as "hard to notice" — do not reintroduce that
+approach). The fix here instead makes the *real* scrollbar reachable: the whole page layout is now
+a flex column pinned to `height:"100vh"` (root div), with the header/error-banner/stats/controls
+rows all `flexShrink:0` (natural size) and the table wrapper as the one `flex:1, minHeight:0,
+overflowY:"auto"` child that absorbs all remaining vertical space. Both of the wrapper's
+scrollbars — including the horizontal one — now sit at that box's own edges, always on-screen,
+regardless of row count. The table header (`<thead>` cells) is `position:"sticky", top:0` so it
+stays visible while scrolling rows inside the box.
+
+A static `maxHeight: "calc(100vh - 300px)"` was tried first and rejected — the guessed 300px
+offset didn't hold at the user's actual narrow window, where the header/title wraps to more lines
+and eats more vertical space than on a wide screen, so the table box still ran off the bottom of
+the viewport (confirmed via Playwright at 830×650: wrapper bottom at 763px against a 650px-tall
+viewport). Flexing off the real ancestor chain (so the table box's height is *whatever's actually
+left*, not a guessed number) is the fix that holds at any window size — **don't go back to a
+`maxHeight: calc(100vh - Npx)` approach here.**
+
+Re-verified via Playwright after both fixes, together, at the user's real narrow window size
+(830×650) and at a normal desktop size (1600×900): filter popover opens with a clean, fully
+clickable 230×320 box in every case tried (default, after horizontal table scroll, after vertical
+table scroll with the sticky header engaged); whole-page `wheel` scroll no longer moves the page
+at all (root is a fixed 100vh) — only the table box's own internal scroll moves; the table box's
+bottom edge (and its horizontal scrollbar) is confirmed within the viewport at both sizes; the
+export-confirm dialog and the Supplier/Item picker dialog (both already `position:fixed` overlays,
+independent of this layout change) still center correctly. Existing regression scripts
+(`test_real_file.js`, `test_real_file2.js`) still pass with no new page errors.
