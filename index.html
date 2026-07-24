@@ -1231,19 +1231,25 @@ function findMasterItem(master, supplier, desc, code) {
 }
 
 const FUZZY_CONFIDENCE_THRESHOLD = 92;
-const CHARACTER_ERROR_RATE_THRESHOLD = 7.5;
+// Widened 7.5 -> 9 per the user's revised 3-tier rule (confirmed): tier 1 (>=92%, CER<=7.5) and
+// tier 2 (>=92%, CER 7.5-9) now both pass — tier 2 used to be its own "ต้องตรวจ" case but the
+// user wants it to pass AND have its Item auto-selected, same as tier 1, since Item auto-fill in
+// `displayRows` already follows directly from `isRowPassing()`. Tier 3 (<92%, roughly down to
+// ~80%) is unchanged — still "ต้องตรวจ", Item never auto-filled. Do not split this back into a
+// separate 7.5/9 branch — a single threshold value is exactly the new rule.
+const CHARACTER_ERROR_RATE_THRESHOLD = 9;
 
 // Pass/fail source of truth: this app's OWN confidence/CER bar, applied uniformly to every row
 // regardless of what IT's `need_review` column says (confirmed with the user: "ยังไงก็ต้องใช้
 // กฎ" — the rule always applies, no matter what need_review's value is). Exact match always
 // passes structurally (IT's real file never carries a confidence/CER for Exact Match rows at
-// all). Fuzzy passes only when confidence >= 92% AND CER <= 7.5%.
+// all). Fuzzy passes only when confidence >= 92% AND CER <= 9% (revised threshold, see above).
 // `needReviewRaw` (§ parseImportedRows) is parsed and kept on the row but is NOT used to decide
-// pass/fail — verified against all 546 rows of IT's real file that this rule alone reproduces
-// the same pass/fail split IT's own need_review implies (every "Validated"/"Validated by High
-// Score" row already clears 92%/7.5% on its own; every "Need Review"/"Validated by Low Score"
-// row already misses it) — so there's no actual conflict, this is just the single, simpler,
-// self-contained source of truth instead of cross-referencing two columns that happen to agree.
+// pass/fail. At the original 7.5% CER threshold this rule was verified to reproduce the exact
+// same pass/fail split IT's own need_review implied across all 546 real rows. The CER threshold
+// has since been widened to 9% (above) at the user's explicit request — this is now a
+// deliberate, acknowledged divergence from IT's need_review for the CER 7.5-9% tier (this app's
+// own rule wins, by design, same as before the threshold change).
 function isRowPassing(row) {
   if (row.matchType === "Exact") return true;
   const cer = Number(row.characterErrorRate);
@@ -1360,6 +1366,31 @@ function buildExportWorkbook(displayRows) {
   const ws = XLSX.utils.json_to_sheet(data);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Item Mapping Validated");
+  return wb;
+}
+
+// Deliberately a narrower column set than buildExportRows (confirmed with the user) — this
+// export exists purely so IT can quickly see which Supplier/Item pairs need adding to Oracle,
+// not to round-trip the full validation file. Do not add the other buildExportRows columns
+// (Match Type, fuzzing_score, etc.) back in here.
+function buildFreeTextExportRows(displayRows) {
+  const exportedAt = formatBangkokTimestamp(new Date());
+  return displayRows.map(r => ({
+    "Invoice No": r.invoiceNo,
+    "Supplier Name": r.supplierNameOcr,
+    "Supplier Item Code": r.ocrItemCode,
+    "Item Description": r.ocrDesc,
+    "Selected Supplier": r.selectedSupplier === "— ยังไม่เลือก —" ? "" : r.selectedSupplier,
+    "Selected Item": r.selectedItem ? r.selectedItem.supplierItemName : "",
+    "Exported At": exportedAt,
+  }));
+}
+
+function buildFreeTextExportWorkbook(displayRows) {
+  const data = buildFreeTextExportRows(displayRows);
+  const ws = XLSX.utils.json_to_sheet(data);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Free Text Entries");
   return wb;
 }
 
@@ -1552,6 +1583,11 @@ function App() {
   const [columnSort, setColumnSort] = useState({ field: null, dir: null });
   const [columnFilters, setColumnFilters] = useState({});
   const [openFilterCol, setOpenFilterCol] = useState(null);
+  // Draft selection while a filter popover is open (Set or null when no popover is open) —
+  // checkboxes only edit this; columnFilters (the applied filter) is only written on "OK", per
+  // the user's request to match Excel's own filter-popover OK/Cancel semantics rather than
+  // applying every checkbox click live. Cancel / close-without-OK just discards this untouched.
+  const [draftFilterValues, setDraftFilterValues] = useState(null);
   const [filterSearchQuery, setFilterSearchQuery] = useState("");
   const [openCell, setOpenCell] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1583,6 +1619,7 @@ function App() {
   const phantomScrollRef = useRef(null);
   const isSyncingScrollRef = useRef(false);
   const optionRefs = useRef({});
+  const searchInputRef = useRef(null);
 
   useEffect(() => {
     loadTimerRef.current = setTimeout(() => {
@@ -1908,29 +1945,54 @@ function App() {
     displayRows.forEach(r => set.add(String(r[field] ?? "")));
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }
-  // A missing/empty Set for a field means "unfiltered" (all values shown) — toggling one
-  // value off materializes the full distinct-value set minus that value; toggling every
-  // value back on removes the field's entry entirely rather than storing a full set, so
-  // filter state stays minimal and "unfiltered" is always represented the same way.
-  function toggleFilterValue(field, value, allValues) {
+  // Opens field's filter popover, seeding the draft from the currently-applied filter (or "all
+  // checked" if unfiltered). Closing without OK (Cancel, Escape, click-outside) just discards
+  // this draft — columnFilters is only ever written by commitFilterDraft.
+  function openFilterPopover(field) {
+    const allValues = distinctValuesFor(field);
+    const current = columnFilters[field];
+    setDraftFilterValues(current ? new Set(current) : new Set(allValues));
+    setFilterSearchQuery("");
+    setOpenFilterCol(field);
+  }
+  function closeFilterPopover() {
+    setOpenFilterCol(null);
+    setDraftFilterValues(null);
+  }
+  // Commits the draft into columnFilters: "all checked" (including an empty distinct-value
+  // list) is stored as no entry at all (unfiltered); anything else — including a fully empty
+  // draft, i.e. every value unchecked, which legitimately means "show zero rows" — is stored
+  // as an explicit Set. A field key's mere presence in columnFilters is what "filtered" means;
+  // do not go back to keying that off `.size > 0`, that can't represent "show nothing".
+  function commitFilterDraft(field, allValues) {
     setColumnFilters(cf => {
       const next = { ...cf };
-      const base = next[field] && next[field].size > 0 ? next[field] : new Set(allValues);
-      const set = new Set(base);
-      if (set.has(value)) set.delete(value); else set.add(value);
-      if (set.size >= allValues.length) delete next[field]; else next[field] = set;
+      if (draftFilterValues && draftFilterValues.size < allValues.length) next[field] = new Set(draftFilterValues);
+      else delete next[field];
+      return next;
+    });
+    closeFilterPopover();
+  }
+  function toggleDraftValue(value) {
+    setDraftFilterValues(draft => {
+      const next = new Set(draft);
+      if (next.has(value)) next.delete(value); else next.add(value);
       return next;
     });
   }
   function renderSortableTh(field, label, width) {
     const isSorted = columnSort.field === field;
     const sortIconColor = isSorted ? "var(--color-accent-700)" : "currentColor";
-    const hasFilter = !!(columnFilters[field] && columnFilters[field].size > 0);
+    const hasFilter = !!columnFilters[field];
     const isOpen = openFilterCol === field;
     const allValues = isOpen ? distinctValuesFor(field) : [];
     const q2 = filterSearchQuery.toLowerCase();
     const visibleValues = q2 ? allValues.filter(v => v.toLowerCase().includes(q2)) : allValues;
-    const currentSet = columnFilters[field];
+    const draft = draftFilterValues || new Set();
+    // Tri-state (Select All): checked only when every distinct value is currently in the draft;
+    // clicking it toggles between "everything checked" and "everything unchecked", matching the
+    // real Excel behavior in the user's reference screenshot (not a one-way "reset" action).
+    const allChecked = allValues.length > 0 && allValues.every(v => draft.has(v));
     return (
       <th key={field} style={{ width, position: "relative" }}>
         <span
@@ -1945,7 +2007,7 @@ function App() {
         </span>
         <button
           title="กรอง"
-          onClick={e => { e.stopPropagation(); setFilterSearchQuery(""); setOpenFilterCol(isOpen ? null : field); }}
+          onClick={e => { e.stopPropagation(); if (isOpen) closeFilterPopover(); else openFilterPopover(field); }}
           style={{ border: "none", background: "none", cursor: "pointer", padding: "0 0 0 5px", verticalAlign: "-2px", color: hasFilter ? "var(--color-accent-700)" : "color-mix(in srgb, var(--color-text) 45%, transparent)" }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill={hasFilter ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="3 4 21 4 14 12 14 19 10 21 10 12 3 4"></polygon></svg>
@@ -1956,22 +2018,26 @@ function App() {
             style={{ position: "absolute", top: "100%", left: 0, zIndex: 45, width: 230, maxHeight: 320, padding: 10, marginTop: 4, gap: 6, fontWeight: 400, textTransform: "none", letterSpacing: "normal" }}
             onClick={e => e.stopPropagation()}
           >
-            <input className="input" style={{ fontSize: 12, padding: "4px 8px", minHeight: "auto" }} placeholder="ค้นหาค่า..." value={filterSearchQuery} onChange={e => setFilterSearchQuery(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setOpenFilterCol(null); }} autoFocus />
+            <input className="input" style={{ fontSize: 12, padding: "4px 8px", minHeight: "auto" }} placeholder="ค้นหาค่า..." value={filterSearchQuery} onChange={e => setFilterSearchQuery(e.target.value)} onKeyDown={e => { if (e.key === "Escape") closeFilterPopover(); }} autoFocus />
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "4px 2px", borderBottom: "1px solid var(--color-divider)", cursor: "pointer" }}>
-              <input type="checkbox" checked={!hasFilter} onChange={() => setColumnFilters(cf => { const next = { ...cf }; delete next[field]; return next; })} />
-              เลือกทั้งหมด
+              <input
+                type="checkbox"
+                checked={allChecked}
+                onChange={() => setDraftFilterValues(allChecked ? new Set() : new Set(allValues))}
+              />
+              (เลือกทั้งหมด)
             </label>
             <div style={{ overflow: "auto", maxHeight: 180, display: "flex", flexDirection: "column", gap: 1 }}>
               {visibleValues.map(v => (
                 <label key={v || "(blank)"} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "3px 2px", cursor: "pointer" }}>
-                  <input type="checkbox" checked={!currentSet || currentSet.size === 0 || currentSet.has(v)} onChange={() => toggleFilterValue(field, v, allValues)} />
+                  <input type="checkbox" checked={draft.has(v)} onChange={() => toggleDraftValue(v)} />
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v || "(ว่าง)"}</span>
                 </label>
               ))}
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
-              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setColumnFilters(cf => { const next = { ...cf }; delete next[field]; return next; }); setOpenFilterCol(null); }}>ล้างตัวกรอง</button>
-              <button className="btn btn-secondary" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setOpenFilterCol(null)}>ปิด</button>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 4 }}>
+              <button className="btn btn-secondary" style={{ fontSize: 11, padding: "3px 10px" }} onClick={closeFilterPopover}>Cancel</button>
+              <button className="btn btn-primary" style={{ fontSize: 11, padding: "3px 10px" }} onClick={() => commitFilterDraft(field, allValues)}>OK</button>
             </div>
           </div>
         )}
@@ -1980,8 +2046,11 @@ function App() {
   }
   let sortedRows = displayRows;
   Object.keys(columnFilters).forEach(field => {
+    // A field's mere presence in columnFilters means "filtered" — including an explicit empty
+    // Set, which legitimately means "show zero rows" (every checkbox unchecked + OK). Do not
+    // add back a `.size > 0` guard here, see commitFilterDraft's comment.
     const allowed = columnFilters[field];
-    if (allowed && allowed.size > 0) sortedRows = sortedRows.filter(r => allowed.has(String(r[field] ?? "")));
+    sortedRows = sortedRows.filter(r => allowed.has(String(r[field] ?? "")));
   });
   if (showOnlyReview) sortedRows = sortedRows.filter(r => r.confLabel === "ต้องตรวจ");
   if (columnSort.field) {
@@ -2018,7 +2087,7 @@ function App() {
   const freeTextRows = displayRows.filter(r => r.isFreeTextSupplier || r.isFreeTextItem);
   const freeTextExportDisabled = freeTextRows.length === 0;
   function exportFreeTextRows() {
-    const wb = buildExportWorkbook(freeTextRows);
+    const wb = buildFreeTextExportWorkbook(freeTextRows);
     const dateStr = new Date().toISOString().slice(0, 10);
     XLSX.writeFile(wb, `Item_Mapping_FreeText_${dateStr}.xlsx`);
   }
@@ -2069,6 +2138,19 @@ function App() {
         dialogFreeTextOption = { key: "freetext", label: `ใช้ "${searchQuery.trim()}" (พิมพ์เอง)`, isFreeText: true, onSelect: () => selectFreeTextItem(openCell.rowId, searchQuery.trim()) };
       }
     }
+  }
+  // Persistent "add new" footer button (§ fix 3) — the in-list free-text option above only
+  // appears once the user has already typed something, which the user found undiscoverable.
+  // This footer button is always visible in the dialog regardless of search state: with no
+  // search text it just focuses the search box (nudging the user to type); with search text it
+  // acts exactly like the in-list free-text option. Do not gate this on q.trim() being non-empty.
+  const dialogAddNewNoun = openCell && openCell.type === "supplier" ? "Supplier" : "Item";
+  function handleDialogAddNew() {
+    if (!q.trim()) {
+      if (searchInputRef.current) searchInputRef.current.focus();
+      return;
+    }
+    if (dialogFreeTextOption) dialogFreeTextOption.onSelect();
   }
   // Keyboard nav (§ requirement 3) walks this combined, flat, selectable list — free-text
   // (when present) is always the last stop so Enter on it creates the free-text entry.
@@ -2159,9 +2241,6 @@ function App() {
             <button className={`btn ${filterBtnClass}`} style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setShowOnlyReview(v => !v)}>แสดงเฉพาะที่ต้องตรวจ</button>
             <span title={bulkTooltip}>
               <button className="btn btn-primary" style={{ fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap", opacity: bulkDisabled ? 0.45 : 1 }} disabled={bulkDisabled} onClick={() => { if (!bulkDisabled) bulkConfirmPassed(); }}>ยืนยันทั้งหมดที่ผ่านเกณฑ์ ({stats.pass})</button>
-            </span>
-            <span title={freeTextExportDisabled ? "ไม่มีแถวที่พิมพ์เอง" : ""}>
-              <button className="btn btn-secondary" style={{ fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap", opacity: freeTextExportDisabled ? 0.45 : 1, border: "1px dashed var(--color-accent-700)", color: "var(--color-accent-700)" }} disabled={freeTextExportDisabled} onClick={() => { if (!freeTextExportDisabled) exportFreeTextRows(); }}>ส่งออกเฉพาะรายการที่พิมพ์เอง ({freeTextRows.length})</button>
             </span>
             <div style={{ marginLeft: "auto", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>ยืนยันแล้ว {stats.confirmed} / {stats.total}</div>
           </div>
@@ -2321,7 +2400,7 @@ function App() {
       )}
 
       {!!openFilterCol && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 44 }} onClick={() => setOpenFilterCol(null)}></div>
+        <div style={{ position: "fixed", inset: 0, zIndex: 44 }} onClick={closeFilterPopover}></div>
       )}
 
       {!!openCell && (
@@ -2359,6 +2438,7 @@ function App() {
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", border: "1px solid var(--color-divider)", borderRadius: "var(--radius-md)" }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.6, flex: "none" }}><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
               <input
+                ref={searchInputRef}
                 className="input"
                 style={{ border: "none", padding: 0, minHeight: "auto" }}
                 placeholder="พิมพ์เพื่อค้นหา..."
@@ -2370,7 +2450,7 @@ function App() {
                     setHighlightIndex(i => {
                       const next = Math.min(i + 1, dialogAllOptions.length - 1);
                       const el = optionRefs.current[dialogAllOptions[next] && dialogAllOptions[next].key];
-                      if (el) el.scrollIntoView({ block: "nearest" });
+                      if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
                       return next;
                     });
                   } else if (e.key === "ArrowUp") {
@@ -2378,7 +2458,7 @@ function App() {
                     setHighlightIndex(i => {
                       const next = Math.max(i - 1, 0);
                       const el = optionRefs.current[dialogAllOptions[next] && dialogAllOptions[next].key];
-                      if (el) el.scrollIntoView({ block: "nearest" });
+                      if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
                       return next;
                     });
                   } else if (e.key === "Enter") {
@@ -2429,6 +2509,13 @@ function App() {
                 </React.Fragment>
               ))}
             </div>
+            <button
+              className="btn btn-secondary"
+              style={{ width: "100%", justifyContent: "center", border: "1px dashed var(--color-accent-700)", color: "var(--color-accent-700)" }}
+              onClick={handleDialogAddNew}
+            >
+              ➕ เพิ่ม {dialogAddNewNoun} ใหม่ (พิมพ์เอง)
+            </button>
             <div className="dialog-actions">
               <button className="btn btn-secondary" onClick={closeDropdown}>ปิด</button>
             </div>
@@ -2452,6 +2539,18 @@ function App() {
             <div className="dialog-actions">
               <button className="btn btn-secondary" onClick={() => setShowExportConfirm(false)}>ยกเลิก</button>
               <button className="btn btn-primary" onClick={confirmExport}>ยืนยันและส่งออก</button>
+            </div>
+            <div style={{ borderTop: "1px solid var(--color-divider)", paddingTop: "var(--space-3)" }}>
+              <span title={freeTextExportDisabled ? "ไม่มีแถวที่พิมพ์เอง" : ""}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ width: "100%", fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap", opacity: freeTextExportDisabled ? 0.45 : 1, border: "1px dashed var(--color-accent-700)", color: "var(--color-accent-700)" }}
+                  disabled={freeTextExportDisabled}
+                  onClick={() => { if (!freeTextExportDisabled) exportFreeTextRows(); }}
+                >
+                  ส่งออกเฉพาะรายการที่พิมพ์เอง ({freeTextRows.length})
+                </button>
+              </span>
             </div>
           </div>
         </div>

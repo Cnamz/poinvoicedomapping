@@ -744,3 +744,61 @@ No dedicated `styles.css` additions were needed — every new element reuses exi
 (`.dialog`, `.dialog-option`, `.tag`, `.btn-ghost`, `--color-accent-*` tokens) with inline style
 overrides for the new-specific bits (drag transform, highlight background, amber tint, popover
 positioning).
+
+## 9b. Second round of fixes from the user, against §9's first pass
+
+The user tried the §9 build against a real Excel-style filter (screenshotted their own Excel's
+AutoFilter as the reference) and against real usage, and asked for 5 changes:
+
+1. **Filter popover: OK/Cancel commit semantics + a real tri-state (Select All), not a
+   live-apply checkbox list.** Previously every checkbox click wrote straight into
+   `columnFilters`, and "(เลือกทั้งหมด)" only ever cleared the filter (a one-way reset, not a
+   toggle) — didn't match the user's Excel reference at all. Reworked with a `draftFilterValues`
+   Set (`null` when no popover is open): `openFilterPopover(field)` seeds the draft from the
+   current filter (or "all checked" if unfiltered); checkboxes only edit the draft;
+   `commitFilterDraft()` (bound to "OK") is the *only* thing that writes `columnFilters`; Cancel
+   / Escape / click-outside all route through `closeFilterPopover()`, which discards the draft
+   untouched. "(เลือกทั้งหมด)" is a real tri-state now: checked only when every distinct value is
+   in the draft, and clicking it sets the draft to either all-values or empty depending on that
+   state (not a fixed "clear" action). **Representation change that matters**: a field's mere
+   *presence* as a key in `columnFilters` now means "filtered" — including storing an explicit
+   **empty** Set, which correctly means "show zero rows" (every checkbox unchecked, then OK).
+   The old code treated an empty Set the same as "no filter" (`.size > 0` guards in both
+   `toggleFilterValue` and the `sortedRows` filter pass) — that's gone; **do not reintroduce a
+   `.size > 0` guard anywhere in the filter-apply path** — it silently breaks "select none" back
+   into "show everything". Do a full read of `openFilterPopover`/`closeFilterPopover`/
+   `commitFilterDraft` (all together, ~30 lines) before touching this area again — the
+   draft/committed split is easy to accidentally undo piecemeal.
+2. **Free-text export button moved from the toolbar into the export confirm dialog** (below the
+   ยกเลิก/ยืนยันและส่งออก actions, behind a divider) — the user wants it discoverable at the moment
+   of exporting, not as a permanent toolbar fixture. Same `exportFreeTextRows()` handler/count,
+   just relocated in JSX; no behavior change beyond location.
+3. **Persistent "add new" button in the Supplier/Item picker**, always visible at the bottom of
+   the option list (not just appearing after the user types something, which the user found
+   undiscoverable). `handleDialogAddNew()`: if the search box is empty, focuses it (via
+   `searchInputRef`, new ref) so the user knows where to type; if it has text, does exactly what
+   the in-list free-text option already did. The dynamic in-list "ใช้ ... (พิมพ์เอง)" option (§9
+   item 7) is unchanged and still appears too — this is additive, not a replacement.
+4. **Free-text export column set narrowed to exactly 7 columns** (confirmed with the user):
+   `Invoice No`, `Supplier Name`, `Supplier Item Code`, `Item Description`, `Selected Supplier`,
+   `Selected Item`, `Exported At` — deliberately *not* the full `buildExportRows` column set
+   (Match Type, fuzzing_score, etc. are irrelevant to "which Supplier/Item to add to Oracle").
+   New `buildFreeTextExportRows()`/`buildFreeTextExportWorkbook()`, kept fully separate from
+   `buildExportRows`/`buildExportWorkbook` (the main export) rather than parameterizing the
+   existing functions — **do not merge these two column sets back together**.
+5. **Fuzzy pass CER threshold widened 7.5 → 9** (`CHARACTER_ERROR_RATE_THRESHOLD`, near
+   `isRowPassing`). Revised 3-tier rule from the user: tier 1 (≥92%, CER≤7.5) and tier 2 (≥92%,
+   CER 7.5–9) **both now pass** — tier 2 used to be its own "ต้องตรวจ" bucket with no auto-fill;
+   now it passes and gets its Item auto-selected too, since Item auto-fill already just follows
+   `isRowPassing()` in `displayRows` (no separate code path needed for "pass but still auto-fill
+   item" — passing *is* what triggers auto-fill). Tier 3 (<92%, "ให้ user เช็ค") is unchanged.
+   This is a single constant change plus comment updates — **do not split it into two separate
+   thresholds**, one value is exactly the new rule.
+
+Verified end-to-end via Playwright against the real 546-row file after this round: uncheck-then-OK
+correctly filters (90 rows for Fuzzy-only), Cancel correctly discards an in-progress draft,
+(เลือกทั้งหมด) correctly toggles both directions, selecting zero values + OK correctly shows 0
+rows, the persistent add-new button correctly focuses-vs-commits depending on search text, and
+the free-text export file was inspected directly (`openpyxl`) to confirm exactly the 7 requested
+headers. Confirmed count went 515 → 516 on the same file after the CER widening (one real Fuzzy
+row moved from the CER 7.5–9 "ต้องตรวจ" bucket into auto-passing).
