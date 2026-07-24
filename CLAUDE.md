@@ -778,12 +778,18 @@ AutoFilter as the reference) and against real usage, and asked for 5 changes:
    confirm dialog. Same `exportFreeTextRows()` handler/count throughout; only the JSX location
    changed each time. **Current final location: top header, immediately after the main export
    button** — if asked to move it again, that's the third relocation, not the first.
-3. **Persistent "add new" button in the Supplier/Item picker**, always visible at the bottom of
-   the option list (not just appearing after the user types something, which the user found
-   undiscoverable). `handleDialogAddNew()`: if the search box is empty, focuses it (via
-   `searchInputRef`, new ref) so the user knows where to type; if it has text, does exactly what
-   the in-list free-text option already did. The dynamic in-list "ใช้ ... (พิมพ์เอง)" option (§9
-   item 7) is unchanged and still appears too — this is additive, not a replacement.
+3. **Persistent "add new" button — tried, then reverted as redundant.** Originally added as an
+   always-visible footer button below the option list (`handleDialogAddNew()`/`searchInputRef`),
+   separate from the in-list "ใช้ ... (พิมพ์เอง)" free-text option (§9 item 7). The user pointed
+   out this was two buttons doing the same thing once search text was entered — genuinely
+   redundant, not just visually — so the footer button, `handleDialogAddNew`, and
+   `searchInputRef` were all removed again. **The in-list free-text option is now the only
+   "add your own" affordance.** It was restyled instead to be immediately noticeable on its own
+   (the user's real ask): solid `--color-accent-100` background + solid `--color-accent-700`
+   border + bold text (not the earlier dashed-border-only treatment that blended into the
+   regular rows), with its own divider line separating it from the rest of the list. **Do not
+   re-add a second, separately-triggered "add new" button** — if discoverability comes up again,
+   the fix is styling/positioning of this one option, not a second entry point.
 4. **Free-text export column set narrowed to exactly 7 columns** (confirmed with the user):
    `Invoice No`, `Supplier Name`, `Supplier Item Code`, `Item Description`, `Selected Supplier`,
    `Selected Item`, `Exported At` — deliberately *not* the full `buildExportRows` column set
@@ -799,11 +805,28 @@ AutoFilter as the reference) and against real usage, and asked for 5 changes:
    item" — passing *is* what triggers auto-fill). Tier 3 (<92%, "ให้ user เช็ค") is unchanged.
    This is a single constant change plus comment updates — **do not split it into two separate
    thresholds**, one value is exactly the new rule.
+6. **Filter popover box size — real bug, reported by the user with a screenshot** ("พังอ่ะ อยู่ๆ
+   ก็หาย กดไม่ได้"). On a real file where a column has many distinct values (e.g. `Invoice No.`
+   on a ~500+ row file, close to one distinct value per row), the popover ballooned to fit every
+   checkbox instead of scrolling, pushing the OK/Cancel buttons off-screen — looked "broken", not
+   just tall. Root cause: the outer popover div had `maxHeight: 320` but no `overflow`, and the
+   inner checkbox-list div had its own `maxHeight: 180, overflow: "auto"` but is a flex child of
+   a `display:flex; flexDirection:column` container — a flex item's default `min-height: auto`
+   silently overrides its own `max-height`/`overflow` unless `minHeight: 0` is set explicitly (a
+   classic flexbox trap). Fixed with both halves together: outer popover now `height: 320,
+   overflow: "hidden"` (a **fixed** height, not just a cap) plus `flex: "none"` on the
+   search/select-all/actions rows; inner list `flex: "1 1 auto", minHeight: 0`. Verified by
+   opening the filter on `Invoice No.`/`OCR Result (Description)`/`Matching Model Result`/
+   `Supplier Item Code (OCR)` (all high-cardinality columns) and confirming the popover's
+   `boundingBox()` stays exactly 230×320 and OK/Cancel stay clickable regardless of how many
+   distinct values exist. **Do not drop either half of this fix** (the fixed outer height+overflow,
+   or the inner `minHeight: 0`) — either alone reproduces the bug on a large-enough column.
 
-Verified end-to-end via Playwright against the real 546-row file after this round: uncheck-then-OK
-correctly filters (90 rows for Fuzzy-only), Cancel correctly discards an in-progress draft,
-(เลือกทั้งหมด) correctly toggles both directions, selecting zero values + OK correctly shows 0
-rows, the persistent add-new button correctly focuses-vs-commits depending on search text, and
-the free-text export file was inspected directly (`openpyxl`) to confirm exactly the 7 requested
-headers. Confirmed count went 515 → 516 on the same file after the CER widening (one real Fuzzy
-row moved from the CER 7.5–9 "ต้องตรวจ" bucket into auto-passing).
+Verified end-to-end via Playwright against real files (546-row and a 539-row file the user
+generated after filtering some rows upstream) after this round: uncheck-then-OK correctly filters
+(90 rows for Fuzzy-only), Cancel correctly discards an in-progress draft, (เลือกทั้งหมด) correctly
+toggles both directions, selecting zero values + OK correctly shows 0 rows, the free-text export
+file was inspected directly (`openpyxl`) to confirm exactly the 7 requested headers, and the
+filter popover holds a fixed size on every high-cardinality column tried. Confirmed count went
+515 → 516 on the same file after the CER widening (one real Fuzzy row moved from the CER 7.5–9
+"ต้องตรวจ" bucket into auto-passing).
