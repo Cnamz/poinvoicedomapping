@@ -560,7 +560,9 @@ client-side): ~7 rows (1.3%) have completely blank `Match Type`/`Matched Item Na
 these is literally a stray `"Delivery Order No."` / `"วันที่"` row that looks like a mis-parsed
 table header, not a real line item. The app renders these safely (blank Match Type → "Fuzzy"
 badge, `need_review = "Need Review"` correctly forces review either way) but doesn't attempt to
-detect or filter out garbage rows — that's IT's extraction pipeline's job.
+detect or filter out garbage rows — that's IT's extraction pipeline's job. (This was revisited
+once — the user considered having the app drop these rows client-side, but decided instead to
+fix it upstream in the Excel input file itself, so this stays IT's responsibility, not the app's.)
 
 Anything in the file that isn't one of these 20 named columns is **hidden from the UI but passed
 through untouched into the export** (the passthrough-fields mechanism, §3) — not discarded. 1 row
@@ -666,3 +668,79 @@ Task #6 is settled on this app's side (monthly batches), just needs IT's formal 
   lives outside this folder, tied to its exact path on the original machine, and does **not**
   travel automatically if this folder is copied elsewhere — that's the whole reason this file
   exists.
+
+## 9. UI/UX requirements batch from a real user meeting (2026-07)
+
+The user (intern) met with the actual users of the app and brought back 7 requests, all
+implemented in one pass. `SCHEMA_VERSION` bumped `4 → 5` (rows gained free-text flags, purely
+additive but a real shape change per this project's usual bump practice).
+
+1. **Excel-style sortable + filterable headers.** `SORTABLE_COLUMNS` (near the top of the file,
+   just above `App()`) lists the 7 columns in scope: Invoice No., Supplier Name, Supplier Item
+   Code (OCR), OCR Result (Description), Match Type, Matching Model Result, % Confidence.
+   `renderSortableTh(field, label, width)` renders each header's sort-arrow + filter-funnel and
+   its popover. State: `columnSort` (`{field, dir}`, replaces the old confidence-only `sortDir`
+   entirely — don't reintroduce a separate sort mechanism), `columnFilters` (`{[field]:
+   Set<value>}` — a field **absent** from this object means unfiltered; an explicit Set means
+   "only show these values"), `openFilterCol`. **Deliberate scope cut**: filter popovers show
+   distinct values computed from the full unfiltered `displayRows`, not cascaded against other
+   currently-active filters like real Excel does — simpler, still very usable, flagged to the
+   user as an implementation simplification rather than asked about up front.
+2. **Fixed horizontal scrollbar at the bottom of the viewport.** The real table scroll wrapper
+   (`overflowX:auto`) already existed; added a synced "phantom" scrollbar
+   (`position:fixed; bottom:0`) so it's reachable at any vertical scroll position on a
+   500+ row table, not just after scrolling all the way down. Only renders when
+   `tableScrollWidth > tableClientWidth` (measured via `tableScrollRef`/`phantomScrollRef` +
+   `isSyncingScrollRef` guard against feedback loops). **Real bug hit during verification**: the
+   measurement effect was originally keyed on `[rows.length]` alone — this missed the case
+   where rows finish importing while `isLoading`'s initial 900ms skeleton timer hasn't cleared
+   yet (rows.length changes first, ref is still null since the table wrapper isn't rendered
+   until `isLoading` clears; `isLoading` then clears in a *separate* render with no
+   `rows.length` change, so the old effect never re-fired and the scrollbar silently never
+   appeared). Fixed by computing `tableVisible` early and depending on `[tableVisible,
+   rows.length]` instead. **Do not narrow this back to `[rows.length]` alone.**
+3. **Keyboard navigation in the Supplier/Item picker.** `highlightIndex` state (resets to 0 on
+   dialog open / search change). ArrowUp/ArrowDown move it (clamped, with `scrollIntoView`),
+   Enter selects `dialogAllOptions[highlightIndex]`, Escape closes — all wired on the picker's
+   search `<input>` `onKeyDown`.
+4. **Draggable picker dialog** (Supplier/Item picker only, not the export confirm dialog — drag,
+   no resize, per the user). `dialogPos` (`{x,y}` or `null` = default centered, reset to `null`
+   on every fresh `openCellAt`). Drag via `onMouseDown` on `.dialog-title` +
+   `document`-level `mousemove`/`mouseup` listeners; applied as `transform: translate(x,y)` on
+   `.dialog`, which layers cleanly on top of `.dialog-backdrop`'s existing
+   `display:grid;place-items:center` centering with no restructuring.
+5. **Supplier auto-fill decoupled from Item's pass/fail gate** — the actual most-requested fix.
+   In `displayRows`: `defaultSupplier` now checks `supplierMaster[r.supplierNameOcr]` directly
+   instead of `(pass || FORCE_CONFIRM_ALL) ? r.supplierNameOcr : null`. Confirmed with the user:
+   Supplier should auto-select for *every* row whose OCR name matches a real Supplier Master
+   key, even when Item confidence doesn't pass and still needs manual review. `defaultItem` is
+   untouched (still gated on `pass || FORCE_CONFIRM_ALL`), and `confirmed = !!selectedItem`
+   still only depends on Item, so a row with an auto-filled Supplier but no Item correctly still
+   shows "ต้องตรวจ", not prematurely green. **Do not reintroduce the `pass` gate on
+   `defaultSupplier`.**
+6. **Recent selections**, session-only (plain `useState`, not `sessionStorage` — intentionally
+   lost on refresh/close per the user), top 3. `recentSuppliers` (string list) /
+   `recentItems` (item-object list, filtered per-dialog-open to only the ones present in the
+   current supplier's item pool). Pushed via `pushRecent()` inside `selectSupplier`/
+   `selectItem`. Rendered as a "ล่าสุด" group above the regular list when the search box is
+   empty, with a "ทั้งหมด" divider before the regular options.
+7. **Free-text Supplier/Item entry**, for when Supplier/Item Master hasn't been updated in
+   Oracle yet and the real value simply has no picker entry. Whenever the picker's search box is
+   non-empty, an extra "ใช้ "..." (พิมพ์เอง)" option appears at the end of the list (skipped if an
+   exact-label match already exists). Selecting it calls `selectFreeTextSupplier`/
+   `selectFreeTextItem`, which set explicit `freeTextSupplier`/`freeTextItem` booleans on the
+   row (and `isFreeText: true` on the item object for Item) — **explicit flags, not inferred
+   from a `supplierMaster` lookup miss**, so styling/export stay correct across re-renders and
+   sessionStorage round-trips regardless of what Supplier Master later contains. Flagged rows
+   get an amber tint + "✎ พิมพ์เอง (ไม่มีในระบบ)" tag on the Supplier/Item picker cells (reuses
+   `--color-accent-*` tokens, not the green "confirmed" tint — free-text is never treated as
+   "confirmed" data). A dedicated toolbar button "ส่งออกเฉพาะรายการที่พิมพ์เอง (N)" (next to
+   "แสดงเฉพาะที่ต้องตรวจ") filters to just those rows and does a **plain `XLSX.writeFile()`
+   classic download** (not the `showSaveFilePicker` flow the main export uses) — this is an
+   occasional secondary action so IT can see exactly which Supplier/Item pairs need adding to
+   Oracle, not the primary round-trip file.
+
+No dedicated `styles.css` additions were needed — every new element reuses existing classes
+(`.dialog`, `.dialog-option`, `.tag`, `.btn-ghost`, `--color-accent-*` tokens) with inline style
+overrides for the new-specific bits (drag transform, highlight background, amber tint, popover
+positioning).

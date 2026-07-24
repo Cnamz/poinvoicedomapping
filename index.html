@@ -1174,7 +1174,10 @@ const RAW_ROWS = BASE_ROWS.concat(EXTRA_ROWS).map(applyItemCodeExactRule).map(wi
 // the tab/browser and reopening the app later must always start clean (no stale batch from a
 // previous session left showing — confirmed with the user, was confusing during testing).
 const STORAGE_KEY = "imv_validation_state";
-const SCHEMA_VERSION = 4;
+// v5: rows gained freeTextSupplier/freeTextItem flags and selectedItem.isFreeText (§ free-text
+// entry) — purely additive, but bumped per this project's practice of bumping on any meaningful
+// row-shape change.
+const SCHEMA_VERSION = 5;
 
 function loadPersistedRows() {
   try {
@@ -1526,11 +1529,30 @@ const SIMULATE_ERROR = false;
 const SIMULATE_EMPTY_DATA = false;
 const FORCE_CONFIRM_ALL = false;
 
+// Excel-style sortable/filterable columns (§ requirement 1) — one entry per header that gets
+// a sort-arrow + filter-funnel control. `type: "number"` sorts numerically; everything else
+// sorts as a locale string compare. Distinct filter values are computed from the row's own
+// field of this name (see distinctValuesFor in App()).
+const SORTABLE_COLUMNS = [
+  { field: "invoiceNo", label: "Invoice No.", width: 120 },
+  { field: "supplierNameOcr", label: "Supplier Name", width: 210 },
+  { field: "ocrItemCode", label: "Supplier Item Code (OCR)", width: 130 },
+  { field: "ocrDesc", label: "OCR Result (Description)", width: 260 },
+  { field: "matchType", label: "Match Type", width: 90 },
+  { field: "matchResult", label: "Matching Model Result", width: 260 },
+  { field: "confidence", label: "% Confidence", width: 180, type: "number" },
+];
+
 function App() {
   const { useState, useEffect, useRef } = React;
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
-  const [sortDir, setSortDir] = useState(null);
+  // Generic per-column sort/filter for the Excel-like header controls (§ requirement 1) —
+  // replaces the old confidence-only sortDir state entirely.
+  const [columnSort, setColumnSort] = useState({ field: null, dir: null });
+  const [columnFilters, setColumnFilters] = useState({});
+  const [openFilterCol, setOpenFilterCol] = useState(null);
+  const [filterSearchQuery, setFilterSearchQuery] = useState("");
   const [openCell, setOpenCell] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showOnlyReview, setShowOnlyReview] = useState(false);
@@ -1545,9 +1567,22 @@ function App() {
   const [importError, setImportError] = useState("");
   const [supplierMaster, setSupplierMaster] = useState(FALLBACK_SUPPLIER_MASTER);
   const [supplierMasterSource, setSupplierMasterSource] = useState("built-in");
+  // Picker dialog additions: keyboard highlight index, drag offset (null = default
+  // centered), and session-only "recently used" lists (§ requirements 3/4/6). All reset
+  // on every fresh dialog open in openCellAt() except the recent lists, which persist for
+  // the whole session (in-memory only — intentionally not written to sessionStorage).
+  const [highlightIndex, setHighlightIndex] = useState(0);
+  const [dialogPos, setDialogPos] = useState(null);
+  const [recentSuppliers, setRecentSuppliers] = useState([]);
+  const [recentItems, setRecentItems] = useState([]);
   const loadTimerRef = useRef(null);
   const toastTimerRef = useRef(null);
   const importInputRef = useRef(null);
+  const dragStateRef = useRef(null);
+  const tableScrollRef = useRef(null);
+  const phantomScrollRef = useRef(null);
+  const isSyncingScrollRef = useRef(false);
+  const optionRefs = useRef({});
 
   useEffect(() => {
     loadTimerRef.current = setTimeout(() => {
@@ -1587,6 +1622,32 @@ function App() {
     persistRows(rows);
   }, [rows]);
 
+  // Measures the real table's scroll width so the fixed bottom "phantom" scrollbar (§
+  // requirement 2) knows whether to render and how wide its spacer div should be. Depends on
+  // tableVisible (mirrors showTable's own isLoading/hasError/rows.length logic, computed here
+  // since showTable itself isn't available yet this early in the function) rather than just
+  // rows.length — rows.length alone missed the real case where rows finish importing while
+  // isLoading's initial 900ms skeleton timer hasn't cleared yet: rows.length changes first
+  // (effect fires, ref still null since the table wrapper isn't rendered until isLoading
+  // clears), then isLoading clears in a *separate* render with no rows.length change, so the
+  // rows.length-only effect never re-fired and the measurement stayed stuck at 0. Do not
+  // narrow this dependency back to [rows.length] alone.
+  const [tableScrollWidth, setTableScrollWidth] = useState(0);
+  const [tableClientWidth, setTableClientWidth] = useState(0);
+  const tableVisible = !isLoading && !hasError && rows.length > 0;
+  useEffect(() => {
+    function measure() {
+      if (tableScrollRef.current) {
+        setTableScrollWidth(tableScrollRef.current.scrollWidth);
+        setTableClientWidth(tableScrollRef.current.clientWidth);
+      }
+    }
+    measure();
+    const raf = requestAnimationFrame(measure);
+    window.addEventListener("resize", measure);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", measure); };
+  }, [tableVisible, rows.length]);
+
   function retryLoad() {
     setIsLoading(true);
     setHasError(false);
@@ -1597,14 +1658,40 @@ function App() {
     }, 900);
   }
 
-  function openCellAt(rowId, type) { setOpenCell({ rowId, type }); setSearchQuery(""); }
+  function openCellAt(rowId, type) {
+    setOpenCell({ rowId, type });
+    setSearchQuery("");
+    setHighlightIndex(0);
+    setDialogPos(null);
+  }
   function closeDropdown() { setOpenCell(null); setSearchQuery(""); }
+  function pushRecent(list, entry, keyOf, max) {
+    const key = keyOf(entry);
+    const rest = list.filter(x => keyOf(x) !== key);
+    return [entry, ...rest].slice(0, max);
+  }
   function selectSupplier(rowId, supplier) {
-    setRows(rs => rs.map(r => r.id === rowId ? { ...r, selectedSupplier: supplier, selectedItem: null, userTouched: true } : r));
+    setRows(rs => rs.map(r => r.id === rowId ? { ...r, selectedSupplier: supplier, selectedItem: null, freeTextSupplier: false, freeTextItem: false, userTouched: true } : r));
+    setRecentSuppliers(list => pushRecent(list, supplier, s => s, 3));
     setOpenCell(null); setSearchQuery("");
   }
   function selectItem(rowId, item) {
-    setRows(rs => rs.map(r => r.id === rowId ? { ...r, selectedItem: item, userTouched: true } : r));
+    setRows(rs => rs.map(r => r.id === rowId ? { ...r, selectedItem: item, freeTextItem: false, userTouched: true } : r));
+    setRecentItems(list => pushRecent(list, item, it => it.supplierItemCode + "||" + it.supplierItemName, 3));
+    setOpenCell(null); setSearchQuery("");
+  }
+  // Free-text entry (§ requirement 7): used when Supplier/Item Master hasn't been updated
+  // yet in Oracle and the real value simply isn't in the picker list. Flags the row so it's
+  // visually distinct (amber tint + "พิมพ์เอง" tag, see displayRows) and so it's included in
+  // the dedicated free-text-only export. Do not infer "free text" from absence in
+  // supplierMaster instead of this explicit flag — it's less robust across re-renders/export.
+  function selectFreeTextSupplier(rowId, text) {
+    setRows(rs => rs.map(r => r.id === rowId ? { ...r, selectedSupplier: text, selectedItem: null, freeTextSupplier: true, freeTextItem: false, userTouched: true } : r));
+    setOpenCell(null); setSearchQuery("");
+  }
+  function selectFreeTextItem(rowId, text) {
+    const item = { supplierItemCode: "", supplierItemName: text, supplierUom: "", isFreeText: true };
+    setRows(rs => rs.map(r => r.id === rowId ? { ...r, selectedItem: item, freeTextItem: true, userTouched: true } : r));
     setOpenCell(null); setSearchQuery("");
   }
   function toggleExpand(rowId) {
@@ -1730,7 +1817,11 @@ function App() {
   const displayRows = effectiveRows.map(r => {
     const effConfidence = r.matchType === "Exact" ? 100 : r.confidence;
     const pass = isRowPassing(r);
-    const defaultSupplier = (pass || FORCE_CONFIRM_ALL) ? r.supplierNameOcr : null;
+    // Supplier auto-fill is intentionally decoupled from the Item pass/fail gate (unlike
+    // Item below) — the user confirmed Supplier should auto-select whenever the OCR name
+    // matches a real Supplier Master key, even on rows that still need manual Item review.
+    // Do not reintroduce `(pass || FORCE_CONFIRM_ALL)` here.
+    const defaultSupplier = supplierMaster[r.supplierNameOcr] ? r.supplierNameOcr : null;
     const defaultItem = (pass || FORCE_CONFIRM_ALL) ? findMasterItem(supplierMaster, r.supplierNameOcr, r.matchResult, r.ocrItemCode) : null;
     const selectedSupplier = r.selectedSupplier !== undefined ? r.selectedSupplier : defaultSupplier;
     const selectedItem = r.selectedItem !== undefined ? r.selectedItem : defaultItem;
@@ -1790,6 +1881,11 @@ function App() {
       isUserConfirmed: confirmed && !!r.userTouched,
       isAutoFilled: confirmed && !r.userTouched,
       supplierCellBg: confirmed ? "oklch(94% 0.045 150)" : "transparent",
+      // Free-text flag (§ requirement 7) — explicit per-row flags set by
+      // selectFreeTextSupplier/selectFreeTextItem, not inferred from a supplierMaster
+      // lookup miss (keeps working correctly across re-renders/export/persisted sessions).
+      isFreeTextSupplier: !!r.freeTextSupplier,
+      isFreeTextItem: !!r.freeTextItem || !!(selectedItem && selectedItem.isFreeText),
       // Shown on the confirm button — must read as the supplier's own item name (matches what
       // the OCR text and the picker list already show), not the internal RVN catalog name,
       // so the reviewer can visually confirm the match against the invoice at a glance.
@@ -1804,10 +1900,104 @@ function App() {
     };
   });
 
+  // Column filters (§ requirement 1) — distinct-value checkboxes computed from the full
+  // unfiltered displayRows (a deliberate scope cut: filters don't cascade against each
+  // other's current selection, unlike real Excel — simpler and still very usable).
+  function distinctValuesFor(field) {
+    const set = new Set();
+    displayRows.forEach(r => set.add(String(r[field] ?? "")));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }
+  // A missing/empty Set for a field means "unfiltered" (all values shown) — toggling one
+  // value off materializes the full distinct-value set minus that value; toggling every
+  // value back on removes the field's entry entirely rather than storing a full set, so
+  // filter state stays minimal and "unfiltered" is always represented the same way.
+  function toggleFilterValue(field, value, allValues) {
+    setColumnFilters(cf => {
+      const next = { ...cf };
+      const base = next[field] && next[field].size > 0 ? next[field] : new Set(allValues);
+      const set = new Set(base);
+      if (set.has(value)) set.delete(value); else set.add(value);
+      if (set.size >= allValues.length) delete next[field]; else next[field] = set;
+      return next;
+    });
+  }
+  function renderSortableTh(field, label, width) {
+    const isSorted = columnSort.field === field;
+    const sortIconColor = isSorted ? "var(--color-accent-700)" : "currentColor";
+    const hasFilter = !!(columnFilters[field] && columnFilters[field].size > 0);
+    const isOpen = openFilterCol === field;
+    const allValues = isOpen ? distinctValuesFor(field) : [];
+    const q2 = filterSearchQuery.toLowerCase();
+    const visibleValues = q2 ? allValues.filter(v => v.toLowerCase().includes(q2)) : allValues;
+    const currentSet = columnFilters[field];
+    return (
+      <th key={field} style={{ width, position: "relative" }}>
+        <span
+          style={{ cursor: "pointer", userSelect: "none" }}
+          onClick={() => setColumnSort(s => ({
+            field,
+            dir: s.field === field && s.dir === "asc" ? "desc" : (s.field === field && s.dir === "desc" ? null : "asc"),
+          }))}
+        >
+          {label}{" "}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={sortIconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ verticalAlign: "-1px" }}><path d="m21 16-4 4-4-4"></path><path d="M17 20V4"></path><path d="m3 8 4-4 4 4"></path><path d="M7 4v16"></path></svg>
+        </span>
+        <button
+          title="กรอง"
+          onClick={e => { e.stopPropagation(); setFilterSearchQuery(""); setOpenFilterCol(isOpen ? null : field); }}
+          style={{ border: "none", background: "none", cursor: "pointer", padding: "0 0 0 5px", verticalAlign: "-2px", color: hasFilter ? "var(--color-accent-700)" : "color-mix(in srgb, var(--color-text) 45%, transparent)" }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill={hasFilter ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="3 4 21 4 14 12 14 19 10 21 10 12 3 4"></polygon></svg>
+        </button>
+        {isOpen && (
+          <div
+            className="dialog"
+            style={{ position: "absolute", top: "100%", left: 0, zIndex: 45, width: 230, maxHeight: 320, padding: 10, marginTop: 4, gap: 6, fontWeight: 400, textTransform: "none", letterSpacing: "normal" }}
+            onClick={e => e.stopPropagation()}
+          >
+            <input className="input" style={{ fontSize: 12, padding: "4px 8px", minHeight: "auto" }} placeholder="ค้นหาค่า..." value={filterSearchQuery} onChange={e => setFilterSearchQuery(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setOpenFilterCol(null); }} autoFocus />
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "4px 2px", borderBottom: "1px solid var(--color-divider)", cursor: "pointer" }}>
+              <input type="checkbox" checked={!hasFilter} onChange={() => setColumnFilters(cf => { const next = { ...cf }; delete next[field]; return next; })} />
+              เลือกทั้งหมด
+            </label>
+            <div style={{ overflow: "auto", maxHeight: 180, display: "flex", flexDirection: "column", gap: 1 }}>
+              {visibleValues.map(v => (
+                <label key={v || "(blank)"} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "3px 2px", cursor: "pointer" }}>
+                  <input type="checkbox" checked={!currentSet || currentSet.size === 0 || currentSet.has(v)} onChange={() => toggleFilterValue(field, v, allValues)} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v || "(ว่าง)"}</span>
+                </label>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setColumnFilters(cf => { const next = { ...cf }; delete next[field]; return next; }); setOpenFilterCol(null); }}>ล้างตัวกรอง</button>
+              <button className="btn btn-secondary" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setOpenFilterCol(null)}>ปิด</button>
+            </div>
+          </div>
+        )}
+      </th>
+    );
+  }
   let sortedRows = displayRows;
-  if (sortDir === "asc") sortedRows = [...displayRows].sort((a, b) => a.confidence - b.confidence);
-  if (sortDir === "desc") sortedRows = [...displayRows].sort((a, b) => b.confidence - a.confidence);
+  Object.keys(columnFilters).forEach(field => {
+    const allowed = columnFilters[field];
+    if (allowed && allowed.size > 0) sortedRows = sortedRows.filter(r => allowed.has(String(r[field] ?? "")));
+  });
   if (showOnlyReview) sortedRows = sortedRows.filter(r => r.confLabel === "ต้องตรวจ");
+  if (columnSort.field) {
+    const field = columnSort.field;
+    const dir = columnSort.dir;
+    const col = SORTABLE_COLUMNS.find(c => c.field === field);
+    const isNumeric = col && col.type === "number";
+    sortedRows = [...sortedRows].sort((a, b) => {
+      if (isNumeric) {
+        const av = Number(a[field]) || 0, bv = Number(b[field]) || 0;
+        return dir === "asc" ? av - bv : bv - av;
+      }
+      const av = String(a[field] ?? ""), bv = String(b[field] ?? "");
+      return dir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+  }
 
   const stats = {
     total: effectiveRows.length,
@@ -1825,23 +2015,47 @@ function App() {
   // dialog, not a hard block.
   const exportDisabled = stats.total === 0;
   const bulkDisabled = stats.pass === 0;
+  const freeTextRows = displayRows.filter(r => r.isFreeTextSupplier || r.isFreeTextItem);
+  const freeTextExportDisabled = freeTextRows.length === 0;
+  function exportFreeTextRows() {
+    const wb = buildExportWorkbook(freeTextRows);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `Item_Mapping_FreeText_${dateStr}.xlsx`);
+  }
 
   let dialogOptions = [];
   let dialogTitle = "";
   let dialogCurrentLabel = "";
+  let dialogFreeTextOption = null;
   if (openCell) {
     const activeRow = displayRows.find(r => r.id === openCell.rowId);
     if (openCell.type === "supplier") {
       dialogTitle = "เลือก Supplier";
       dialogCurrentLabel = activeRow && activeRow.selectedSupplier ? activeRow.selectedSupplier : "";
-      dialogOptions = Object.keys(supplierMaster)
+      const recentOptions = !q
+        ? recentSuppliers
+            .filter(name => !!supplierMaster[name])
+            .map(name => ({ key: "recent-" + name, label: name, sub: "", isRecent: true, selected: name === dialogCurrentLabel, onSelect: () => selectSupplier(openCell.rowId, name) }))
+        : [];
+      const mainOptions = Object.keys(supplierMaster)
         .filter(name => !q || name.toLowerCase().includes(q))
         .map(name => ({ key: name, label: name, sub: "", selected: name === dialogCurrentLabel, onSelect: () => selectSupplier(openCell.rowId, name) }));
+      dialogOptions = recentOptions.concat(mainOptions);
+      if (q.trim() && !mainOptions.some(o => o.label.toLowerCase() === q)) {
+        dialogFreeTextOption = { key: "freetext", label: `ใช้ "${searchQuery.trim()}" (พิมพ์เอง)`, isFreeText: true, onSelect: () => selectFreeTextSupplier(openCell.rowId, searchQuery.trim()) };
+      }
     } else if (activeRow) {
       dialogTitle = "เลือก Item";
       dialogCurrentLabel = activeRow.selectedItem ? activeRow.selectedItem.supplierItemName : "";
       const pool = supplierMaster[activeRow.selectedSupplier] || [];
-      dialogOptions = pool
+      const poolKey = it => (it.supplierItemCode || "") + "||" + it.supplierItemName;
+      const poolKeys = new Set(pool.map(poolKey));
+      const recentOptions = !q
+        ? recentItems
+            .filter(it => poolKeys.has(poolKey(it)))
+            .map((it, idx) => ({ key: "recent-" + poolKey(it), label: it.supplierItemName, sub: "", isRecent: true, selected: !!activeRow.selectedItem && it.supplierItemName === activeRow.selectedItem.supplierItemName && it.supplierItemCode === activeRow.selectedItem.supplierItemCode, onSelect: () => selectItem(openCell.rowId, it) }))
+        : [];
+      const mainOptions = pool
         .filter(it => !q || (it.supplierItemCode + it.supplierItemName).toLowerCase().includes(q))
         .map((it, idx) => ({
           key: (it.supplierItemCode || "noCode") + "-" + idx,
@@ -1850,13 +2064,19 @@ function App() {
           selected: !!activeRow.selectedItem && it.supplierItemName === activeRow.selectedItem.supplierItemName && it.supplierItemCode === activeRow.selectedItem.supplierItemCode,
           onSelect: () => selectItem(openCell.rowId, it),
         }));
+      dialogOptions = recentOptions.concat(mainOptions);
+      if (q.trim() && !mainOptions.some(o => o.label.toLowerCase() === q)) {
+        dialogFreeTextOption = { key: "freetext", label: `ใช้ "${searchQuery.trim()}" (พิมพ์เอง)`, isFreeText: true, onSelect: () => selectFreeTextItem(openCell.rowId, searchQuery.trim()) };
+      }
     }
   }
+  // Keyboard nav (§ requirement 3) walks this combined, flat, selectable list — free-text
+  // (when present) is always the last stop so Enter on it creates the free-text entry.
+  const dialogAllOptions = dialogFreeTextOption ? dialogOptions.concat([dialogFreeTextOption]) : dialogOptions;
 
   const isError = !isLoading && hasError;
   const isEmpty = !isLoading && !hasError && stats.total === 0;
   const showTable = !isLoading && !hasError && stats.total > 0;
-  const sortIconColor = sortDir ? "var(--color-accent-700)" : "currentColor";
   const filterBtnClass = showOnlyReview ? "btn-primary" : "btn-secondary";
   const exportTooltip = exportDisabled ? "ไม่มีข้อมูลให้ส่งออก" : "";
   const bulkTooltip = bulkDisabled ? "ไม่มีแถวที่ผ่านเกณฑ์ให้ยืนยัน" : "";
@@ -1940,23 +2160,27 @@ function App() {
             <span title={bulkTooltip}>
               <button className="btn btn-primary" style={{ fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap", opacity: bulkDisabled ? 0.45 : 1 }} disabled={bulkDisabled} onClick={() => { if (!bulkDisabled) bulkConfirmPassed(); }}>ยืนยันทั้งหมดที่ผ่านเกณฑ์ ({stats.pass})</button>
             </span>
+            <span title={freeTextExportDisabled ? "ไม่มีแถวที่พิมพ์เอง" : ""}>
+              <button className="btn btn-secondary" style={{ fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap", opacity: freeTextExportDisabled ? 0.45 : 1, border: "1px dashed var(--color-accent-700)", color: "var(--color-accent-700)" }} disabled={freeTextExportDisabled} onClick={() => { if (!freeTextExportDisabled) exportFreeTextRows(); }}>ส่งออกเฉพาะรายการที่พิมพ์เอง ({freeTextRows.length})</button>
+            </span>
             <div style={{ marginLeft: "auto", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>ยืนยันแล้ว {stats.confirmed} / {stats.total}</div>
           </div>
 
-          <div style={{ overflowX: "auto", overflowY: "visible", border: "1px solid var(--color-divider)", borderRadius: "var(--radius-md)", position: "relative", background: "var(--color-bg)" }}>
+          <div
+            ref={tableScrollRef}
+            style={{ overflowX: "auto", overflowY: "visible", border: "1px solid var(--color-divider)", borderRadius: "var(--radius-md)", position: "relative", background: "var(--color-bg)" }}
+            onScroll={e => {
+              if (isSyncingScrollRef.current) return;
+              isSyncingScrollRef.current = true;
+              if (phantomScrollRef.current) phantomScrollRef.current.scrollLeft = e.target.scrollLeft;
+              isSyncingScrollRef.current = false;
+            }}
+          >
             <table className="table" style={{ minWidth: 1790, tableLayout: "fixed", borderCollapse: "separate", borderSpacing: 0 }}>
               <thead>
                 <tr>
                   <th style={{ width: 40 }}></th>
-                  <th style={{ width: 120 }}>Invoice No.</th>
-                  <th style={{ width: 210 }}>Supplier Name</th>
-                  <th style={{ width: 130 }}>Supplier Item Code (OCR)</th>
-                  <th style={{ width: 260 }}>OCR Result (Description)</th>
-                  <th style={{ width: 90 }}>Match Type</th>
-                  <th style={{ width: 260 }}>Matching Model Result</th>
-                  <th style={{ width: 180, cursor: "pointer", userSelect: "none" }} onClick={() => setSortDir(d => d === "desc" ? "asc" : (d === "asc" ? null : "desc"))}>
-                    % Confidence <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={sortIconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ verticalAlign: "-1px" }}><path d="m21 16-4 4-4-4"></path><path d="M17 20V4"></path><path d="m3 8 4-4 4 4"></path><path d="M7 4v16"></path></svg>
-                  </th>
+                  {SORTABLE_COLUMNS.map(c => renderSortableTh(c.field, c.label, c.width))}
                   <th style={{ width: 220 }}>เลือก Supplier</th>
                   <th style={{ width: 280 }}>เลือก Item</th>
                 </tr>
@@ -2002,17 +2226,20 @@ function App() {
                           {row.confidence}% · {row.confLabel}
                         </span>
                       </td>
-                      <td>
-                        <button className="btn btn-secondary" style={{ width: "100%", justifyContent: "space-between", fontFamily: "var(--font-body)", fontWeight: 400, fontSize: 13 }} onClick={row.onOpenSupplier}>
+                      <td style={{ background: row.isFreeTextSupplier ? "var(--color-accent-100)" : undefined }}>
+                        <button className="btn btn-secondary" style={{ width: "100%", justifyContent: "space-between", fontFamily: "var(--font-body)", fontWeight: 400, fontSize: 13, border: row.isFreeTextSupplier ? "1px dashed var(--color-accent-700)" : undefined }} onClick={row.onOpenSupplier}>
                           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.selectedSupplier}</span>
                           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
                         </button>
+                        {row.isFreeTextSupplier && <div style={{ fontSize: 10, color: "var(--color-accent-700)", marginTop: 4 }}>✎ พิมพ์เอง (ไม่มีในระบบ)</div>}
                       </td>
-                      <td>
-                        <button className="btn btn-secondary" style={{ width: "100%", justifyContent: "space-between", fontFamily: "var(--font-body)", fontWeight: 400, fontSize: 13 }} onClick={row.onOpenItem}>
+                      <td style={{ background: row.isFreeTextItem ? "var(--color-accent-100)" : undefined }}>
+                        <button className="btn btn-secondary" style={{ width: "100%", justifyContent: "space-between", fontFamily: "var(--font-body)", fontWeight: 400, fontSize: 13, border: row.isFreeTextItem ? "1px dashed var(--color-accent-700)" : undefined }} onClick={row.onOpenItem}>
                           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.itemButtonLabel}</span>
                           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
-                        </button>                      </td>
+                        </button>
+                        {row.isFreeTextItem && <div style={{ fontSize: 10, color: "var(--color-accent-700)", marginTop: 4 }}>✎ พิมพ์เอง (ไม่มีในระบบ)</div>}
+                      </td>
                     </tr>
                     {row.isExpanded && (
                       <tr>
@@ -2078,11 +2305,52 @@ function App() {
           </div>
         </div>
       )}
+      {showTable && tableScrollWidth > tableClientWidth && (
+        <div
+          ref={phantomScrollRef}
+          style={{ position: "fixed", left: 0, right: 0, bottom: 0, height: 16, overflowX: "auto", overflowY: "hidden", zIndex: 40, background: "var(--color-bg)", borderTop: "1px solid var(--color-divider)" }}
+          onScroll={e => {
+            if (isSyncingScrollRef.current) return;
+            isSyncingScrollRef.current = true;
+            if (tableScrollRef.current) tableScrollRef.current.scrollLeft = e.target.scrollLeft;
+            isSyncingScrollRef.current = false;
+          }}
+        >
+          <div style={{ height: 1, width: tableScrollWidth }}></div>
+        </div>
+      )}
+
+      {!!openFilterCol && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 44 }} onClick={() => setOpenFilterCol(null)}></div>
+      )}
 
       {!!openCell && (
         <div className="dialog-backdrop" onClick={closeDropdown} style={{ zIndex: 50 }}>
-          <div className="dialog" onClick={e => e.stopPropagation()} style={{ maxHeight: "70vh" }}>
-            <div className="dialog-title">{dialogTitle}</div>
+          <div
+            className="dialog"
+            onClick={e => e.stopPropagation()}
+            style={{ maxHeight: "70vh", transform: dialogPos ? `translate(${dialogPos.x}px, ${dialogPos.y}px)` : undefined }}
+          >
+            <div
+              className="dialog-title"
+              style={{ cursor: "grab", userSelect: "none" }}
+              onMouseDown={e => {
+                e.preventDefault();
+                const start = { x: e.clientX, y: e.clientY, base: dialogPos || { x: 0, y: 0 } };
+                dragStateRef.current = start;
+                const onMove = ev => {
+                  setDialogPos({ x: start.base.x + (ev.clientX - start.x), y: start.base.y + (ev.clientY - start.y) });
+                };
+                const onUp = () => {
+                  document.removeEventListener("mousemove", onMove);
+                  document.removeEventListener("mouseup", onUp);
+                };
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+              }}
+            >
+              {dialogTitle}
+            </div>
             {dialogCurrentLabel && (
               <div style={{ fontSize: 13, padding: "6px 10px", background: "color-mix(in srgb, var(--color-accent-700) 10%, transparent)", borderRadius: "var(--radius-md)" }}>
                 <span style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>ตอนนี้เลือก :</span> <strong>{dialogCurrentLabel}</strong>
@@ -2090,22 +2358,75 @@ function App() {
             )}
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", border: "1px solid var(--color-divider)", borderRadius: "var(--radius-md)" }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.6, flex: "none" }}><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-              <input className="input" style={{ border: "none", padding: 0, minHeight: "auto" }} placeholder="พิมพ์เพื่อค้นหา..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} autoFocus />
+              <input
+                className="input"
+                style={{ border: "none", padding: 0, minHeight: "auto" }}
+                placeholder="พิมพ์เพื่อค้นหา..."
+                value={searchQuery}
+                onChange={e => { setSearchQuery(e.target.value); setHighlightIndex(0); }}
+                onKeyDown={e => {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setHighlightIndex(i => {
+                      const next = Math.min(i + 1, dialogAllOptions.length - 1);
+                      const el = optionRefs.current[dialogAllOptions[next] && dialogAllOptions[next].key];
+                      if (el) el.scrollIntoView({ block: "nearest" });
+                      return next;
+                    });
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setHighlightIndex(i => {
+                      const next = Math.max(i - 1, 0);
+                      const el = optionRefs.current[dialogAllOptions[next] && dialogAllOptions[next].key];
+                      if (el) el.scrollIntoView({ block: "nearest" });
+                      return next;
+                    });
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    const opt = dialogAllOptions[highlightIndex];
+                    if (opt) opt.onSelect();
+                  } else if (e.key === "Escape") {
+                    closeDropdown();
+                  }
+                }}
+                autoFocus
+              />
             </div>
             <div style={{ overflow: "auto", maxHeight: 320, display: "flex", flexDirection: "column", gap: 2 }}>
-              {dialogOptions.length === 0 && (
+              {dialogAllOptions.length === 0 && (
                 <div style={{ padding: "14px 8px", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>ไม่พบรายการที่ตรงกัน</div>
               )}
-              {dialogOptions.map(opt => (
-                <div key={opt.key} className="dialog-option" style={{ padding: 10, fontSize: 14, borderRadius: "var(--radius-sm)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: opt.selected ? "color-mix(in srgb, var(--color-accent-700) 10%, transparent)" : undefined }} onClick={opt.onSelect}>
-                  <div>
-                    <div>{opt.label}</div>
-                    <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{opt.sub}</div>
-                  </div>
-                  {opt.selected && (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", color: "var(--color-accent-700)" }}><polyline points="20 6 9 17 4 12"></polyline></svg>
+              {dialogAllOptions.map((opt, idx) => (
+                <React.Fragment key={opt.key}>
+                  {idx === 0 && opt.isRecent && (
+                    <div style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "2px 8px" }}>ล่าสุด</div>
                   )}
-                </div>
+                  {idx > 0 && dialogAllOptions[idx - 1].isRecent && !opt.isRecent && (
+                    <div style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "6px 8px 2px", borderTop: "1px solid var(--color-divider)", marginTop: 2 }}>ทั้งหมด</div>
+                  )}
+                  <div
+                    ref={el => { if (el) optionRefs.current[opt.key] = el; }}
+                    className="dialog-option"
+                    style={{
+                      padding: 10, fontSize: 14, borderRadius: "var(--radius-sm)", cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                      border: opt.isFreeText ? "1px dashed var(--color-accent-700)" : "1px solid transparent",
+                      background: idx === highlightIndex
+                        ? "color-mix(in srgb, var(--color-accent-700) 16%, transparent)"
+                        : (opt.selected ? "color-mix(in srgb, var(--color-accent-700) 10%, transparent)" : undefined),
+                    }}
+                    onClick={opt.onSelect}
+                    onMouseEnter={() => setHighlightIndex(idx)}
+                  >
+                    <div>
+                      <div style={opt.isFreeText ? { color: "var(--color-accent-700)" } : undefined}>{opt.isFreeText ? `➕ ${opt.label}` : opt.label}</div>
+                      {opt.sub && <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{opt.sub}</div>}
+                    </div>
+                    {opt.selected && (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", color: "var(--color-accent-700)" }}><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    )}
+                  </div>
+                </React.Fragment>
               ))}
             </div>
             <div className="dialog-actions">
