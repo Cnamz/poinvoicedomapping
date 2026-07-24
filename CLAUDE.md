@@ -769,10 +769,15 @@ AutoFilter as the reference) and against real usage, and asked for 5 changes:
    into "show everything". Do a full read of `openFilterPopover`/`closeFilterPopover`/
    `commitFilterDraft` (all together, ~30 lines) before touching this area again — the
    draft/committed split is easy to accidentally undo piecemeal.
-2. **Free-text export button moved from the toolbar into the export confirm dialog** (below the
-   ยกเลิก/ยืนยันและส่งออก actions, behind a divider) — the user wants it discoverable at the moment
-   of exporting, not as a permanent toolbar fixture. Same `exportFreeTextRows()` handler/count,
-   just relocated in JSX; no behavior change beyond location.
+2. **Free-text export button relocated twice, ended up in the top header next to the main
+   export button.** First moved from the toolbar (next to "แสดงเฉพาะที่ต้องตรวจ") into the export
+   confirm dialog (below ยกเลิก/ยืนยันและส่งออก) — but the user then pointed at a screenshot of the
+   main "เสร็จสิ้นและส่งออกข้อมูล" header button and asked for this one to sit next to it instead,
+   so it's now a sibling `<button>` in the same top-right header flex row as
+   "เสร็จสิ้นและส่งออกข้อมูล"/"นำเข้าไฟล์ Excel" — not in the toolbar row, not inside the export
+   confirm dialog. Same `exportFreeTextRows()` handler/count throughout; only the JSX location
+   changed each time. **Current final location: top header, immediately after the main export
+   button** — if asked to move it again, that's the third relocation, not the first.
 3. **Persistent "add new" button in the Supplier/Item picker**, always visible at the bottom of
    the option list (not just appearing after the user types something, which the user found
    undiscoverable). `handleDialogAddNew()`: if the search box is empty, focuses it (via

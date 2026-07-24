@@ -2185,6 +2185,16 @@ function App() {
               เสร็จสิ้นและส่งออกข้อมูล
             </button>
           </span>
+          <span title={freeTextExportDisabled ? "ไม่มีแถวที่พิมพ์เอง" : ""}>
+            <button
+              className="btn btn-secondary"
+              style={{ flex: "none", whiteSpace: "nowrap", opacity: freeTextExportDisabled ? 0.45 : 1, border: "1px dashed var(--color-accent-700)", color: "var(--color-accent-700)" }}
+              disabled={freeTextExportDisabled}
+              onClick={() => { if (!freeTextExportDisabled) exportFreeTextRows(); }}
+            >
+              ส่งออกเฉพาะรายการที่พิมพ์เอง ({freeTextRows.length})
+            </button>
+          </span>
         </div>
       </div>
 
@@ -2539,18 +2549,6 @@ function App() {
             <div className="dialog-actions">
               <button className="btn btn-secondary" onClick={() => setShowExportConfirm(false)}>ยกเลิก</button>
               <button className="btn btn-primary" onClick={confirmExport}>ยืนยันและส่งออก</button>
-            </div>
-            <div style={{ borderTop: "1px solid var(--color-divider)", paddingTop: "var(--space-3)" }}>
-              <span title={freeTextExportDisabled ? "ไม่มีแถวที่พิมพ์เอง" : ""}>
-                <button
-                  className="btn btn-secondary"
-                  style={{ width: "100%", fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap", opacity: freeTextExportDisabled ? 0.45 : 1, border: "1px dashed var(--color-accent-700)", color: "var(--color-accent-700)" }}
-                  disabled={freeTextExportDisabled}
-                  onClick={() => { if (!freeTextExportDisabled) exportFreeTextRows(); }}
-                >
-                  ส่งออกเฉพาะรายการที่พิมพ์เอง ({freeTextRows.length})
-                </button>
-              </span>
             </div>
           </div>
         </div>
